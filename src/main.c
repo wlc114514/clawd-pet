@@ -34,6 +34,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
+    IDM_FLIP,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -832,6 +833,7 @@ static void show_menu(PetWin *pw)
 
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
+    AppendMenuW(m, MF_STRING, IDM_FLIP, L"后空翻");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
     HMENU play = CreatePopupMenu();
     AppendMenuW(play, MF_STRING, IDM_PLAY_GREET, L"打招呼聊天");
@@ -886,6 +888,10 @@ static void show_menu(PetWin *pw)
     case IDM_SLEEP:
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_sleep(&g_pets[i]->pet);
+        break;
+    case IDM_FLIP:
+        for (int i = 0; i < g_npets; i++)
+            if (!pw || g_pets[i] == pw) pet_flip(&g_pets[i]->pet);
         break;
     case IDM_CLIMB:
         for (int i = 0; i < g_npets; i++)

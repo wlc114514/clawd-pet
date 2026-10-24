@@ -35,6 +35,11 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 #define RIDE_HOP    10
 #define C_NOTE      0x9B7BFFu
 
+// Backflip.
+#define FLIP_CROUCH 5       // ticks crouched before take-off
+#define FLIP_VY     12.0    // take-off speed (scale 4); with gravity 1 that is 24 ticks in the air
+#define FLIP_LIFT   6       // canvas rows the sprite is raised by when upside down, so the hat fits
+
 // The pet's solid box, in canvas columns: arm tip to arm tip. It runs from
 // the top of the head (SPR_OY) down to the feet (FOOT_Y).
 #define BOX_L (SPR_OX + 1)
@@ -161,6 +166,14 @@ static void set_state(Pet *p, int st, int dur)
     p->state = st;
     p->t = 0;
     p->dur = dur;
+    p->spin = 0;
+}
+
+static void start_flip(Pet *p)
+{
+    p->vx = p->vy = 0;
+    p->following = 0;
+    set_state(p, ST_FLIP, 0);
 }
 
 // States the pet is free to leave for something more interesting.
@@ -648,6 +661,10 @@ void pet_click(Pet *p)
         p->vy = -10 * u;
         set_state(p, ST_FALL, 0);
     } else if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) {
+        if (rr(p, 0, 4) == 0) {   // showing off
+            start_flip(p);
+            return;
+        }
         if (rr(p, 0, 4)) say(p, G_HEART, C_HEART);
         else say(p, G_QUEST, C_WHITE);
         p->vx = 0;
@@ -657,9 +674,18 @@ void pet_click(Pet *p)
     }
 }
 
+void pet_flip(Pet *p)
+{
+    if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) start_flip(p);
+}
+
 void pet_cheer(Pet *p)
 {
     if (!is_free(p->state) && p->state != ST_LAND && !is_social(p->state)) return;
+    if (rr(p, 0, 2) == 0) {
+        start_flip(p);
+        return;
+    }
     say(p, G_HEART, C_HEART);
     p->vx = 0;
     p->vy = -11 * unit(p);
@@ -855,7 +881,7 @@ void pet_update(Pet *p, const World *w)
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
         p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP &&
-        p->state != ST_RIDE) {
+        p->state != ST_RIDE && p->state != ST_FLIP) {
         if (p->y < gy - 0.5) {   // walked off the end of a wall: keep going a little
             p->vx = p->state == ST_WALK || p->state == ST_FLEE ? p->dir * 1.5 * u : 0;
             p->vy = 0;
@@ -955,6 +981,10 @@ void pet_update(Pet *p, const World *w)
                 p->following = 0;
                 set_state(p, ST_WALK, rr(p, 60, 240));
             } else if (r < walk_pct + 8 && !p->carrying) {
+                if (rr(p, 0, 4) == 0) {
+                    start_flip(p);
+                    break;
+                }
                 p->vx = 0;
                 p->vy = -7 * u;
                 set_state(p, ST_JUMP, 0);
@@ -1054,10 +1084,22 @@ void pet_update(Pet *p, const World *w)
 
     case ST_FALL:
     case ST_JUMP:
-    case ST_STARTLE: {
+    case ST_STARTLE:
+    case ST_FLIP: {
         if (p->state == ST_STARTLE && p->vy >= 0 && p->dur > 0) {
             p->dur--;   // cartoon freeze at the top of the leap
             q = pose_startle(p->look);
+            break;
+        }
+        int flip = p->state == ST_FLIP;
+        if (flip && p->t < FLIP_CROUCH) {   // crouch down for it
+            q = pose_land(0);
+            q.eyes = EYE_HAPPY;
+            q.look = p->dir;
+            if (++p->t == FLIP_CROUCH) {
+                p->vy = -FLIP_VY * u;
+                p->vx = -p->dir * 1.5 * u;   // a little way backwards
+            }
             break;
         }
         double k = p->scale, feet_was = p->y + FOOT_Y * k, head_was = p->y + SPR_OY * k;
@@ -1088,6 +1130,15 @@ void pet_update(Pet *p, const World *w)
         q = p->state == ST_JUMP    ? pose_hop(p->vy < 0)
           : p->state == ST_STARTLE ? pose_startle(p->look)
           : pose_air(p->vy < 0);
+        if (flip) {   // tucked in, turning head over heels backwards
+            q = pose_stand();
+            q.eyes = EYE_HAPPY;
+            q.look = p->dir;
+            q.arm_l = q.arm_r = -3;
+            for (int i = 0; i < 4; i++) q.legs[i] = 1;
+            double f = (double)(++p->t - FLIP_CROUCH) / (2 * FLIP_VY);
+            p->spin = -p->dir * 6.283185307179586 * (f < 1 ? f : 1);
+        }
         if (p->bonked) q.eyes = EYE_DIZZY;
         double fy = floor_at(p, p->x, feet_was) - FOOT_Y * k;
         if (p->y >= fy) {
@@ -1104,6 +1155,10 @@ void pet_update(Pet *p, const World *w)
             }
             set_state(p, ST_LAND, hard ? 10 : 5);
             q = pose_land(hard);
+            if (flip) {   // stuck the landing
+                q.eyes = EYE_HAPPY;
+                say(p, G_STAR, C_EXCL);
+            }
         }
         break;
     }
@@ -1454,7 +1509,26 @@ void pet_render(const Pet *p, Canvas *c)
 {
     cv_clear(c);
     if (p->fan) draw_fan(c, p->fan_side > 0 ? CW - FAN_W : 0, FOOT_Y - FAN_H, (p->fan_t / 2) % 2);
-    draw_clawd(c, SPR_OX + p->shake, SPR_OY, &p->pose);
+    if (p->spin != 0) {
+        // Turned about the middle of the body, raised a little so the hat
+        // still fits when it is upside down.
+        static uint32_t px[CW * CH];
+        Canvas s = { px, CW, CH };
+        cv_clear(&s);
+        draw_clawd(&s, SPR_OX + p->shake, SPR_OY, &p->pose);
+        double cx = SPR_OX + 9, cy = SPR_OY + 5, co = cos(p->spin), si = sin(p->spin);
+        double dy = cy - floor(FLIP_LIFT * fabs(sin(p->spin / 2)) + 0.5);
+        for (int y = 0; y < CH; y++)
+            for (int x = 0; x < CW; x++) {
+                double fx = x + 0.5 - cx, fy = y + 0.5 - dy;
+                int sx = (int)floor(fx * co + fy * si + cx), sy = (int)floor(-fx * si + fy * co + cy);
+                if (sx < 0 || sy < 0 || sx >= CW || sy >= CH) continue;
+                uint32_t v = px[sy * CW + sx];
+                if (v >> 24) c->px[y * CW + x] = v;
+            }
+    } else {
+        draw_clawd(c, SPR_OX + p->shake, SPR_OY, &p->pose);
+    }
     for (int i = 0; i < MAX_BUBBLES; i++) {
         const Bubble *b = &p->bub[i];
         if (b->life <= 0) continue;

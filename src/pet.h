@@ -11,6 +11,7 @@ enum {
     ST_STARTLE,// cartoon leap backwards, freezing at the top
     ST_CLIMB,  // hopping up a staircase that pops out of the taskbar
     ST_BUMP,   // walked into a wall: splat, stagger back, see stars
+    ST_FLIP,   // backflip: crouch, then a full turn backwards in the air
     // Doing something with another pet (Pet.buddy); see pets_together().
     ST_GREET,  // face to face, waving
     ST_CHAT,   // taking turns to say something in pixel emoji
@@ -94,6 +95,7 @@ typedef struct {
     int thrown;            // flying after being let go mid-drag (gets air drag)
     int bonked;            // hit a wall in the air: dazed once it lands (+1 / -1 its side, 2 above)
     int bump_side;         // ST_BUMP: which side the wall is on (0: it was overhead)
+    double spin;           // drawn turned by this many radians (backflip), 0 = upright
     int fan, fan_side, fan_t;   // desk fan out (too hot); which side (-1 left / +1 right); spin ticks
     int tap_t, tap_side;
     Stairs stairs;
@@ -126,6 +128,7 @@ void pet_begin_drag(Pet *p, POINT grab);
 void pet_end_drag(Pet *p);
 void pet_click(Pet *p);
 void pet_cheer(Pet *p);
+void pet_flip(Pet *p);
 void pet_sleep(Pet *p);
 void pet_leave(Pet *p);
 void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x

@@ -31,6 +31,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
+    IDM_FLIP,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -845,6 +846,7 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
 
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
+    add_item(m, @"后空翻", IDM_FLIP, NO, YES, self);
     add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
     NSMenu *play = [[NSMenu alloc] initWithTitle:@"一起玩"];
     add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, YES, self);
@@ -922,6 +924,10 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     case IDM_SLEEP:
         for (PetWindow *p in g_pets)
             if (!pw || p == pw) pet_sleep(p.pet);
+        break;
+    case IDM_FLIP:
+        for (PetWindow *p in g_pets)
+            if (!pw || p == pw) pet_flip(p.pet);
         break;
     case IDM_CLIMB:
         for (PetWindow *p in g_pets)
