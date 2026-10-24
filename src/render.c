@@ -42,7 +42,9 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     int dy = p->body_dy;
     int top = oy + dy + (p->squash > 0) - (p->squash < 0);
     int bot = oy + 7 + dy;
-    rect(c, ox + 3, top, ox + 14, bot, COL_BODY);
+    // Sideways stretch pulls one side (its arm and legs too) further out.
+    int sl = p->stretch_x < 0 ? p->stretch_x : 0, sr = p->stretch_x > 0 ? p->stretch_x : 0;
+    rect(c, ox + 3 + sl, top, ox + 14 + sr, bot, COL_BODY);
 
     if (p->prop == PROP_KEYBOARD) {
         int ky = oy + 6 + dy;
@@ -51,12 +53,13 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     }
 
     int ay = oy + 4 + dy;
-    rect(c, ox + 1, ay + p->arm_l, ox + 2, ay + p->arm_l + 1, COL_BODY);
-    rect(c, ox + 15, ay + p->arm_r, ox + 16, ay + p->arm_r + 1, COL_BODY);
+    rect(c, ox + 1 + sl, ay + p->arm_l, ox + 2 + sl, ay + p->arm_l + 1, COL_BODY);
+    rect(c, ox + 15 + sr, ay + p->arm_r, ox + 16 + sr, ay + p->arm_r + 1, COL_BODY);
 
-    for (int i = 0; i < 4; i++)
-        if (p->legs[i] > 0)
-            rect(c, ox + LEG_X[i], bot + 1, ox + LEG_X[i], bot + p->legs[i], COL_BODY);
+    for (int i = 0; i < 4; i++) {
+        int lx = ox + LEG_X[i] + (i < 2 ? sl : sr);
+        if (p->legs[i] > 0) rect(c, lx, bot + 1, lx, bot + p->legs[i], COL_BODY);
+    }
 
     int ey = top + 2;
     int ex[2] = { ox + 5 + p->look, ox + 12 + p->look };

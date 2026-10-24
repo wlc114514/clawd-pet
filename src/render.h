@@ -28,6 +28,7 @@ typedef struct {
     int arm_l, arm_r; // vertical arm offset
     int legs[4];      // leg length below the body, 0..3
     int prop;         // PROP_*, drawn in front of the body, behind the arms
+    int stretch_x;    // body pulled sideways by n px (+ right, - left); eyes stay put
 } Pose;
 
 void cv_clear(Canvas *c);

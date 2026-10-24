@@ -196,13 +196,14 @@ static Pose pose_shock(int t)
     return q;
 }
 
-// Tom-style fright: stretched stiff, arms flung up, legs rigid, staring back
-// at whatever scared it.
+// Tom-style fright: body yanked out long away from the scare (`look` points
+// back at it), a bit flatter for it, arms flung up, legs rigid.
 static Pose pose_startle(int look)
 {
     Pose q = pose_stand();
     q.eyes = EYE_WIDE;
-    q.squash = -1;
+    q.squash = 1;
+    q.stretch_x = -3 * look;
     q.arm_l = q.arm_r = -4;
     q.look = look;
     for (int i = 0; i < 4; i++) q.legs[i] = 3;
@@ -343,8 +344,8 @@ void pet_startle(Pet *p, double from_x)
     p->forced_sleep = 0;
     p->following = 0;
     p->look = -dir;                      // ...while staring at it
-    p->vx = dir * 5 * u;
-    p->vy = -13 * u;
+    p->vx = dir * 6 * u;
+    p->vy = -8 * u;
     say(p, G_EXCL, C_EXCL);
     set_state(p, ST_STARTLE, 6);         // dur = ticks frozen at the apex
 }
