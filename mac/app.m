@@ -158,11 +158,25 @@ static NSArray<NSString *> *shell_rcs(void)
 static NSString *const CLI_MARK_BEGIN = @"# >>> Clawd >>>";
 static NSString *const CLI_MARK_END = @"# <<< Clawd <<<";
 
+// A shell rc's text: @"" if there is no such file, nil if it exists but
+// can't be read as UTF-8 (then it must be left alone, not overwritten).
+static NSString *read_rc(NSString *rc)
+{
+    if (![[NSFileManager defaultManager] fileExistsAtPath:rc]) return @"";
+    return [NSString stringWithContentsOfFile:rc encoding:NSUTF8StringEncoding error:NULL];
+}
+
+// Writes through a symlinked rc (dotfile managers) instead of replacing the link.
+static void write_rc(NSString *rc, NSString *text)
+{
+    [text writeToFile:[rc stringByResolvingSymlinksInPath] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
 static BOOL cli_enabled(void)
 {
     if (![[NSFileManager defaultManager] fileExistsAtPath:cli_script()]) return NO;
     for (NSString *rc in shell_rcs()) {
-        NSString *s = [NSString stringWithContentsOfFile:rc encoding:NSUTF8StringEncoding error:NULL];
+        NSString *s = read_rc(rc);
         if (s && [s containsString:CLI_MARK_BEGIN]) return YES;
     }
     return NO;
@@ -185,10 +199,9 @@ static void cli_set(BOOL on)
         NSString *block = [NSString stringWithFormat:@"\n%@\nexport PATH=\"%@:$PATH\"\n%@\n",
                            CLI_MARK_BEGIN, dir, CLI_MARK_END];
         for (NSString *rc in shell_rcs()) {
-            NSString *s = [NSString stringWithContentsOfFile:rc encoding:NSUTF8StringEncoding error:NULL];
-            if (s && [s containsString:CLI_MARK_BEGIN]) continue;
-            NSString *out = [(s ?: @"") stringByAppendingString:block];
-            [out writeToFile:rc atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            NSString *s = read_rc(rc);
+            if (!s || [s containsString:CLI_MARK_BEGIN]) continue;
+            write_rc(rc, [s stringByAppendingString:block]);
         }
         return;
     }
@@ -196,18 +209,21 @@ static void cli_set(BOOL on)
     [fm removeItemAtPath:script error:NULL];
     [fm removeItemAtPath:dir error:NULL];
     for (NSString *rc in shell_rcs()) {
-        NSString *s = [NSString stringWithContentsOfFile:rc encoding:NSUTF8StringEncoding error:NULL];
+        NSString *s = read_rc(rc);
         if (!s || ![s containsString:CLI_MARK_BEGIN]) continue;
-        NSMutableString *out = [NSMutableString string];
+        // Drop the block and the blank line put in front of it, keep the rest as it was.
+        NSMutableArray<NSString *> *keep = [NSMutableArray array];
         BOOL skip = NO;
         for (NSString *line in [s componentsSeparatedByString:@"\n"]) {
-            if ([line isEqualToString:CLI_MARK_BEGIN]) { skip = YES; continue; }
+            if ([line isEqualToString:CLI_MARK_BEGIN]) {
+                if ([keep.lastObject isEqualToString:@""]) [keep removeLastObject];
+                skip = YES;
+                continue;
+            }
             if ([line isEqualToString:CLI_MARK_END]) { skip = NO; continue; }
-            if (skip) continue;
-            [out appendString:line];
-            [out appendString:@"\n"];
+            if (!skip) [keep addObject:line];
         }
-        [out writeToFile:rc atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        write_rc(rc, [keep componentsJoinedByString:@"\n"]);
     }
 }
 
