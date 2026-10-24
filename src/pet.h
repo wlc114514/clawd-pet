@@ -1,5 +1,5 @@
 #pragma once
-#include <windows.h>
+#include "platform.h"
 #include "render.h"
 
 enum {

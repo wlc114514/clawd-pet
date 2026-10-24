@@ -1,6 +1,6 @@
 # clawd-pet
 
-Claude Code 吉祥物 Clawd 的 Windows 桌宠。纯 C + Win32 API，单个 exe（约 150 KB），不依赖任何运行库，常驻 CPU 占用约 0.2%。
+Claude Code 吉祥物 Clawd 的 Windows / macOS 桌宠。Windows 版是纯 C + Win32 API，单个 exe（约 150 KB），不依赖任何运行库，常驻 CPU 占用约 0.2%；macOS 版共用同一套状态机和像素画，外壳换成 Cocoa，产物是一个 Clawd.app。
 
 > 粉丝作品，与 Anthropic 无关。Clawd 形象归 Anthropic 所有。
 
@@ -24,6 +24,8 @@ Claude Code 吉祥物 Clawd 的 Windows 桌宠。纯 C + Win32 API，单个 exe�
 
 ## 编译
 
+### Windows
+
 需要 [w64devkit](https://github.com/skeeto/w64devkit)（便携 gcc）。`build.bat` 会先找 PATH 里的 gcc，找不到就用 `%USERPROFILE%\w64devkit\bin`。
 
 ```bat
@@ -31,6 +33,18 @@ build.bat
 ```
 
 产物是根目录的 `clawd.exe`。编译前先退出正在运行的桌宠，否则 exe 被占用无法覆盖。
+
+### macOS
+
+需要 Xcode 命令行工具（`xcode-select --install`），没有别的依赖。
+
+```sh
+cd mac
+make        # 产物是 mac/build/Clawd.app
+make run    # 编译并启动
+```
+
+`src/pet.c`（状态机、物理）和 `src/render.c`（像素画）两边共用，平台相关的部分分别在 `src/platform_win.c` 和 `mac/plat_mac.m` 里，所以两个平台的行为是一致的。
 
 ## 联动 Claude Code
 
@@ -51,6 +65,21 @@ build.bat
 
 按 Esc 打断 Claude 时 Claude Code 不会发 `Stop`，桌宠会继续敲最多 3 分钟后自己停下。
 
+macOS 上把命令换成 app 里的可执行文件，其余一样：
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "prompt"], "async": true }] }],
+    "PostToolUse":        [{ "matcher": "*", "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "tool"], "async": true }] }],
+    "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "tool"], "async": true }] }],
+    "PermissionRequest":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "permission"], "async": true }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "stop"], "async": true }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "/Applications/Clawd.app/Contents/MacOS/Clawd", "args": ["--cc", "end"], "async": true }] }]
+  }
+}
+```
+
 ## 命令行
 
 | 命令 | 作用 |
@@ -59,6 +88,24 @@ build.bat
 | `clawd` | 右键菜单「设置」里勾上「终端里可用 clawd 命令」后，新开的终端里直接敲 `clawd` 就能启动（参数照传）。它在 `%LOCALAPPDATA%\ClawdPet\bin` 放一个 `clawd.cmd`，只把这个目录加进用户 PATH；取消勾选会全部删掉 |
 | `clawd.exe --cc <prompt\|tool\|permission\|stop\|end>` | 给运行中的桌宠发 Claude Code 事件 |
 | `clawd.exe --sheet out.bmp` | 把所有姿势导出成一张图，调像素画用 |
+
+macOS 上对应的是 `Clawd.app/Contents/MacOS/Clawd`，参数完全一样（没有 `.exe`）。「终端里可用 clawd 命令」会在 `~/Library/Application Support/ClawdPet/bin` 放一个 `clawd` 脚本，并往 `~/.zshrc`（有 `~/.bash_profile` 的话也加）追加一段带 `# >>> Clawd >>>` 标记的 PATH，取消勾选会连脚本带这段一起删掉。
+
+## macOS 版说明
+
+行为跟 Windows 版一样，只是把几个系统概念换了个说法：
+
+| Windows | macOS |
+|---|---|
+| 站在任务栏上 | 站在 Dock 上（Dock 自动隐藏时站在屏幕底边） |
+| 托盘图标 | 菜单栏图标 |
+| 设置存在 `HKCU\Software\ClawdPet` | 设置存在 `NSUserDefaults`（`~/Library/Preferences/com.github.wlc114514.clawd-pet.plist`） |
+| 开机自启写注册表 Run 键 | 开机自启写 `~/Library/LaunchAgents/com.github.wlc114514.clawd-pet.plist` |
+| 读热区域温度 | 读系统报告的热压力（`NSProcessInfo.thermalState`）：正常、偏热、过热；读不到就按 CPU 占用流汗 |
+| 全屏游戏时躲起来 | 窗口不加入全屏 Space，另外每秒两次检查有没有别的窗口盖满整块屏幕 |
+| 用窗口消息发 Claude Code 事件 | 往 `~/Library/Application Support/ClawdPet/cc.sock` 发一个字节的 unix 数据报 |
+
+「打字时陪你敲」靠轮询按键状态（`CGEventSourceKeyState`），和 Windows 版一样不装键盘钩子、不记录按了什么。macOS 需要「系统设置 ▸ 隐私与安全性 ▸ 辅助功能」里允许 Clawd，没允许的话它只是不动手，别的不受影响。
 
 ## 代码结构
 
@@ -69,4 +116,11 @@ build.bat
 | `src/bubble.c` | 中文文字气泡（独立的分层窗口） |
 | `src/picker.c` | 番茄钟的滚轮选时间小窗 |
 | `src/main.c` | 窗口、托盘、菜单、设置、番茄钟、全屏检测、Claude Code 事件 |
+| `src/platform.h` | 核心用到的那几个平台接口（鼠标、空闲时间、屏幕工作区） |
+| `src/platform_win.c` | 上面这些接口的 Win32 实现 |
 | `tools/mkicon.c` | 编译时生成 exe 图标 |
+| `mac/app.m` | macOS 的外壳：菜单栏图标和菜单、设置、传感、番茄钟、Claude Code 事件、`clawd` 命令 |
+| `mac/pet_window.m` | 一只 Clawd 的窗口（透明、不抢焦点）和它爬的楼梯 |
+| `mac/bubble.m` | 中文气泡窗口 |
+| `mac/picker.m` | 番茄钟的滚轮选时间小窗 |
+| `mac/plat_mac.m` | 平台接口的 Cocoa 实现、屏幕坐标换算、位图转换 |

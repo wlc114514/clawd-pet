@@ -1,5 +1,6 @@
 #include "pet.h"
 #include <math.h>
+#include <string.h>
 
 #define SLEEP_AFTER_MS (5 * 60 * 1000)
 
@@ -44,19 +45,13 @@ static double max_x(const Pet *p) { return p->area.right - (SPR_OX + 17) * p->sc
 
 static DWORD idle_ms(void)
 {
-    LASTINPUTINFO li = { sizeof li };
-    GetLastInputInfo(&li);
-    return GetTickCount() - li.dwTime;
+    return plat_idle_ms();
 }
 
 static void refresh_area(Pet *p)
 {
     POINT feet = { (LONG)p->x + CW * p->scale / 2, (LONG)p->y + FOOT_Y * p->scale - 1 };
-    MONITORINFO mi = { sizeof mi };
-    if (GetMonitorInfoW(MonitorFromPoint(feet, MONITOR_DEFAULTTONEAREST), &mi)) {
-        p->area = mi.rcWork;
-        p->screen = mi.rcMonitor;
-    }
+    plat_screen_rects(feet, &p->area, &p->screen);
 }
 
 static void set_state(Pet *p, int st, int dur)
@@ -368,10 +363,10 @@ int pet_demo_poses(Pose *out, int max)
 
 void pet_init(Pet *p, int scale, unsigned seed)
 {
-    ZeroMemory(p, sizeof *p);
+    memset(p, 0, sizeof *p);
     p->rng = seed | 1;
     p->scale = scale;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &p->area, 0);
+    plat_work_area(&p->area, &p->screen);
     p->x = min_x(p) + rr(p, 0, (int)(max_x(p) - min_x(p)));
     p->y = ground_y(p);
     p->dir = 1;
@@ -519,7 +514,7 @@ void pet_climb(Pet *p)
     if (stairs_room(p, dir) < n) n = stairs_room(p, dir);
 
     Stairs *s = &p->stairs;
-    ZeroMemory(s, sizeof *s);
+    memset(s, 0, sizeof *s);
     s->n = n;
     s->dir = dir;
     s->scale = p->scale;
@@ -696,7 +691,7 @@ void pet_update(Pet *p, const World *w)
         }
         if (w->heat == 1 && p->t % 90 == 15) spawn_drop(p);
         if (++p->t >= p->dur) {
-            if (p->perch && GetTickCount64() >= p->perch_until) {   // seen enough: jump down
+            if (p->perch && plat_ticks_ms() >= p->perch_until) {   // seen enough: jump down
                 say(p, G_HEART, C_HEART);
                 p->perch = 0;
                 p->vx = p->dir * 2 * u;
@@ -799,7 +794,7 @@ void pet_update(Pet *p, const World *w)
 
     case ST_DRAG: {
         POINT c;
-        GetCursorPos(&c);
+        plat_cursor(&c);
         double nx = c.x - p->drag_dx, ny = c.y - p->drag_dy;
         p->vx = p->vx * 0.5 + (nx - p->x) * 0.5;
         p->vy = p->vy * 0.5 + (ny - p->y) * 0.5;
@@ -888,7 +883,7 @@ void pet_update(Pet *p, const World *w)
                     p->dur = 1;
                 } else {                 // the top: stairs crumble away, the floor stays
                     p->perch = p->area.bottom - (p->y + FOOT_Y * k);
-                    p->perch_until = GetTickCount64() + (ULONGLONG)rr(p, 60, 180) * 1000;
+                    p->perch_until = plat_ticks_ms() + (ULONGLONG)rr(p, 60, 180) * 1000;
                     stairs_crumble(p);
                     say(p, G_HEART, C_HEART);
                     set_state(p, ST_IDLE, rr(p, 40, 90));
