@@ -1,0 +1,88 @@
+# Builds both apps on every push and pull request, and checks that they draw
+# exactly the same pixels (the pose sheet from `--sheet`). When a release is
+# published, the Mac app is zipped and attached to it next to clawd.exe.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+      - name: Build
+        shell: pwsh
+        run: |
+          "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" | Out-File -Append $env:GITHUB_PATH
+          $env:PATH = "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin;$env:PATH"
+          cmd /c build.bat
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Pose sheet
+        shell: pwsh
+        run: |
+          Start-Process -Wait -FilePath .\clawd.exe -ArgumentList '--sheet', 'sheet-win.bmp'
+          if (!(Test-Path sheet-win.bmp)) { throw 'no sheet' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            clawd.exe
+            sheet-win.bmp
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (arm64 + x86_64, warnings are errors)
+        working-directory: mac
+        run: make CC="clang -arch arm64 -arch x86_64 -Werror"
+      - name: Pose sheet
+        run: |
+          lipo -info mac/build/Clawd.app/Contents/MacOS/Clawd
+          mac/build/Clawd.app/Contents/MacOS/Clawd --sheet sheet-mac.bmp
+      - name: Zip
+        working-directory: mac/build
+        run: ditto -c -k --keepParent Clawd.app ../../Clawd-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            Clawd-mac.zip
+            sheet-mac.bmp
+
+  same-pixels:
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Compare pose sheets
+        run: |
+          sha256sum windows/sheet-win.bmp mac/sheet-mac.bmp
+          cmp windows/sheet-win.bmp mac/sheet-mac.bmp && echo "Windows and macOS draw the same pixels"
+
+  release:
+    if: github.event_name == 'release'
+    needs: [same-pixels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac
+      - name: Attach Clawd-mac.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" Clawd-mac.zip --clobber --repo "${{ github.repository }}"
