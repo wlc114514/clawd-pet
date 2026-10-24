@@ -91,6 +91,13 @@ void walls_hide_on(NSSet<NSNumber *> *displays);    // displays behind a fullscr
 + (void)close;
 @end
 
+/* ---- updates ----------------------------------------------------------- */
+// Asks GitHub for the latest release; done runs on the main thread, with
+// the newer release's tag ("v1.2.3") when result is UPD_NEWER.
+enum { UPD_NEWER, UPD_LATEST, UPD_FAILED };
+void update_check(void (^done)(int result, NSString *tag));
+NSURL *update_page(NSString *tag);   // where to download it
+
 /* ---- wardrobe ---------------------------------------------------------- */
 // Dressing one pet (menu: 换装…): a preview, every accessory to click on and
 // off, random / take everything off. Each change goes straight to changed.

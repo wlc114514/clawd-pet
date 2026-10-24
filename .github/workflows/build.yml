@@ -1,6 +1,7 @@
-# Builds both apps on every push and pull request, and checks that they draw
-# exactly the same pixels (the pose sheet from `--sheet`). When a release is
-# published, the Mac app is zipped and attached to it next to clawd.exe.
+# Builds both apps on every push and pull request, checks that they draw
+# exactly the same pixels (the pose sheet from `--sheet`) and that they agree
+# on their version. When a release is published, the Mac app is zipped and
+# attached to it next to clawd.exe.
 name: build
 
 on:
@@ -74,9 +75,30 @@ jobs:
           sha256sum windows/sheet-win.bmp mac/sheet-mac.bmp
           cmp windows/sheet-win.bmp mac/sheet-mac.bmp && echo "Windows and macOS draw the same pixels"
 
+  # The apps tell the user about newer releases by comparing tags with the
+  # version they were built as, so the two had better agree.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: version.h, Info.plist and the release tag agree
+        run: |
+          v=$(sed -n 's/^#define CLAWD_VERSION "\(.*\)"$/\1/p' src/version.h)
+          echo "version.h: $v"
+          [ -n "$v" ] || { echo "no CLAWD_VERSION in src/version.h"; exit 1; }
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            p=$(grep -A1 "<key>$key</key>" mac/Info.plist | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
+            echo "Info.plist $key: $p"
+            [ "$p" = "$v" ] || { echo "mac/Info.plist $key is $p, not $v"; exit 1; }
+          done
+          if [ "${{ github.event_name }}" = release ]; then
+            tag="${{ github.event.release.tag_name }}"
+            [ "$tag" = "v$v" ] || { echo "release $tag, but the apps say they are $v"; exit 1; }
+          fi
+
   release:
     if: github.event_name == 'release'
-    needs: [same-pixels]
+    needs: [same-pixels, version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

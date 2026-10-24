@@ -4,6 +4,7 @@
  * reminders, the Claude Code hook socket, and the `clawd` command.
  */
 #import "mac.h"
+#include "version.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -31,7 +32,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_OPEN, IDM_FEAT_UPDATE,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -53,6 +54,7 @@ static NSSet<NSNumber *> *g_fs;   // displays hidden behind a fullscreen window
 static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscreen = 1, g_water = 0;
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
+static int g_feat_update = 1;   // look for a new version now and then
 
 // runtime
 static int g_pomo;                 // 0 off, 1 focus, 2 break
@@ -62,6 +64,8 @@ static dispatch_source_t g_cc_src;   // held here: a source must outlive the cal
 static POINT g_last_cursor;
 static ULONGLONG g_cursor_moved_at, g_last_key_at;
 static unsigned char g_key_down[256];
+static ULONGLONG g_update_next;            // next automatic check
+static NSString *g_update_tag, *g_update_told;   // a newer release; the one we last told about
 
 /* ---- settings --------------------------------------------------------- */
 
@@ -545,6 +549,8 @@ static int write_sheet(const char *path)
     g_feat_pomo = ud_int(@"FeatPomo", 1) != 0;
     g_feat_water = ud_int(@"FeatWater", 1) != 0;
     g_feat_climb = ud_int(@"FeatClimb", 1) != 0;
+    g_feat_update = ud_int(@"FeatUpdate", 1) != 0;
+    g_update_next = plat_ticks_ms() + 60000;
     g_stair_style = clampi(ud_int(@"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);
     g_pomo_focus = ud_int(@"PomoFocus", 25);
     if (g_pomo_focus < FOCUS_LO || g_pomo_focus > FOCUS_HI || g_pomo_focus % FOCUS_STEP) g_pomo_focus = 25;
@@ -738,7 +744,34 @@ static int write_sheet(const char *path)
         [self announce:@"该喝水啦！" ms:15000 cheer:YES];
     }
 
+    if (now >= g_update_next) {   // a minute after starting, then once a day
+        g_update_next = now + 24ULL * 3600 * 1000;
+        if (g_feat_update) [self checkUpdate:NO];
+    }
+
     [self updateTooltip];
+}
+
+- (void)checkUpdate:(BOOL)manual
+{
+    update_check(^(int result, NSString *tag) {
+        switch (result) {
+        case UPD_NEWER:
+            g_update_tag = tag;
+            if (manual || ![g_update_told isEqualToString:tag]) {   // once per version unless asked
+                g_update_told = tag;
+                [self announce:[NSString stringWithFormat:@"有新版本 %@ 啦！\n菜单里点「下载 %@」", tag, tag]
+                            ms:10000 cheer:NO];
+            }
+            break;
+        case UPD_LATEST:
+            if (manual) [self announce:@"已经是最新版 v" CLAWD_VERSION " 啦" ms:4000 cheer:NO];
+            break;
+        default:
+            if (manual) [self announce:@"检查更新失败了，网络好像不太通" ms:4000 cheer:NO];
+            break;
+        }
+    });
 }
 
 - (void)updateTooltip
@@ -825,6 +858,7 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(feat, @"番茄钟", IDM_FEAT_POMO, g_feat_pomo, YES, self);
     add_item(feat, @"喝水提醒", IDM_FEAT_WATER, g_feat_water, YES, self);
     add_item(feat, @"爬楼梯", IDM_FEAT_CLIMB, g_feat_climb, YES, self);
+    add_item(feat, @"自动检查更新", IDM_FEAT_UPDATE, g_feat_update, YES, self);
 
     // Settings live in one submenu; the top level is things to do right now.
     NSMenu *set = [[NSMenu alloc] initWithTitle:@"设置"];
@@ -843,6 +877,8 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(set, @"全屏时躲起来", IDM_FULLSCREEN, g_hide_fullscreen, YES, self);
     add_item(set, @"开机自启", IDM_AUTOSTART, autostart_enabled(), YES, self);
     add_item(set, @"终端里可用 clawd 命令", IDM_CLI, cli_enabled(), YES, self);
+    [set addItem:[NSMenuItem separatorItem]];
+    add_item(set, @"检查更新（当前 v" CLAWD_VERSION "）", IDM_UPDATE_CHECK, NO, YES, self);
 
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
@@ -886,6 +922,8 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     [m addItem:[NSMenuItem separatorItem]];
     add_item(m, @"再来一只", IDM_ADD_PET, NO, g_pets.count < MAX_PETS, self);
     add_item(m, @"送走一只", IDM_REMOVE_PET, NO, [self activePets] > 1, self);
+    if (g_update_tag)
+        add_item(m, [NSString stringWithFormat:@"下载 %@", g_update_tag], IDM_UPDATE_OPEN, NO, YES, self);
     add_submenu(m, @"设置", set);
     [m addItem:[NSMenuItem separatorItem]];
     add_item(m, @"退出", IDM_EXIT, NO, YES, self);
@@ -1049,6 +1087,16 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
             cli_set(YES);
             if (cli_enabled()) [self announce:@"新开一个终端，\n输入 clawd 就能叫我出来" ms:6000 cheer:NO];
         }
+        break;
+    case IDM_FEAT_UPDATE:
+        g_feat_update = !g_feat_update;
+        ud_set(@"FeatUpdate", g_feat_update);
+        break;
+    case IDM_UPDATE_CHECK:
+        [self checkUpdate:YES];
+        break;
+    case IDM_UPDATE_OPEN:
+        if (g_update_tag) [NSWorkspace.sharedWorkspace openURL:update_page(g_update_tag)];
         break;
     case IDM_AUTOSTART:
         autostart_set(!autostart_enabled());

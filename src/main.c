@@ -13,9 +13,12 @@
 #include "bubble.h"
 #include "picker.h"
 #include "wardrobe.h"
+#include "update.h"
+#include "version.h"
 #include "wall.h"
 
 #define WM_TRAY    (WM_APP + 1)
+#define WM_UPDATE  (WM_APP + 2)   // from update.c: wParam UPD_*, lParam manual
 #define TICK_MS    33
 #define MAX_PETS   6
 #define APP_NAME   L"ClawdPet"
@@ -34,7 +37,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -76,10 +79,14 @@ static UINT g_dpi = 96;
 static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscreen = 1, g_water = 0;
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
+static int g_feat_update = 1;   // look for a new version now and then
 static int g_stair_style = STAIRS_SLAB;
 
 // runtime
 static World g_world;
+static ULONGLONG g_update_next;   // next automatic check
+static int g_update_ready;        // a newer release is out (update_tag())
+static char g_update_told[32];    // the one we last told the user about
 static PetWin *g_press_pw;
 static int g_dragging;
 static POINT g_press_pt, g_last_cursor;
@@ -629,6 +636,11 @@ static DWORD user_idle_ms(void)
 static void every_second(void)
 {
     ULONGLONG now = GetTickCount64();
+    if (now >= g_update_next) {   // a minute after starting, then once a day
+        g_update_next = now + 24ULL * 3600 * 1000;
+        update_cleanup();
+        if (g_feat_update) update_check(g_host, WM_UPDATE, 0);
+    }
     g_world.cpu = g_world.cpu * 0.5 + sample_cpu() * 0.5;
     g_world.heat = sample_heat();
 
@@ -809,6 +821,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_pomo), IDM_FEAT_POMO, L"番茄钟");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_climb), IDM_FEAT_CLIMB, L"爬楼梯");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_update), IDM_FEAT_UPDATE, L"自动检查更新");
 
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
     for (int i = 0; i < g_npets; i++)
@@ -830,6 +843,8 @@ static void show_menu(PetWin *pw)
     AppendMenuW(set, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
     AppendMenuW(set, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
     AppendMenuW(set, MF_STRING | CHECK(cli_enabled()), IDM_CLI, L"终端里可用 clawd 命令");
+    AppendMenuW(set, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(set, MF_STRING, IDM_UPDATE_CHECK, L"检查更新（当前 v" CLAWD_VERSION L"）");
 
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
@@ -867,6 +882,12 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
     AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
+    if (g_update_ready) {
+        wchar_t up[64];
+        _snwprintf(up, 64, L"更新到 %hs", update_tag());
+        up[63] = 0;
+        AppendMenuW(m, MF_STRING, IDM_UPDATE_INSTALL, up);
+    }
     AppendMenuW(m, MF_POPUP, (UINT_PTR)set, L"设置");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
@@ -909,6 +930,17 @@ static void show_menu(PetWin *pw)
     case IDM_STAIRS_OUTLINE:
         g_stair_style = cmd - IDM_STAIRS_SLAB;
         reg_set_dword(L"StairStyle", (DWORD)g_stair_style);
+        break;
+    case IDM_FEAT_UPDATE:
+        g_feat_update = !g_feat_update;
+        reg_set_dword(L"FeatUpdate", (DWORD)g_feat_update);
+        break;
+    case IDM_UPDATE_CHECK:
+        update_check(g_host, WM_UPDATE, 1);
+        break;
+    case IDM_UPDATE_INSTALL:
+        announce(L"正在下载新版本…", 60000, 0);
+        update_install(g_host, WM_UPDATE);
         break;
     case IDM_FEAT_CLIMB:
         g_feat_climb = !g_feat_climb;
@@ -1053,9 +1085,56 @@ static LRESULT CALLBACK pet_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// What update.c found or did.
+static void on_update(int result, int manual)
+{
+    wchar_t msg[128];
+    switch (result) {
+    case UPD_NEWER:
+        g_update_ready = 1;
+        if (manual || strcmp(g_update_told, update_tag())) {   // once per version unless asked
+            strcpy(g_update_told, update_tag());
+            _snwprintf(msg, 128, L"有新版本 %hs 啦！\n右键菜单里点「更新到 %hs」", update_tag(), update_tag());
+            msg[127] = 0;
+            announce(msg, 10000, 0);
+        }
+        break;
+    case UPD_LATEST:
+        if (manual) announce(L"已经是最新版 v" CLAWD_VERSION L" 啦", 4000, 0);
+        break;
+    case UPD_FAILED:
+        if (manual) announce(L"检查更新失败了，网络好像不太通", 4000, 0);
+        break;
+    case UPD_INSTALLED: {   // start the new one and make way for it
+        wchar_t exe[MAX_PATH], cmd[MAX_PATH + 32];
+        GetModuleFileNameW(NULL, exe, MAX_PATH);
+        _snwprintf(cmd, MAX_PATH + 32, L"\"%s\" --updated", exe);
+        cmd[MAX_PATH + 31] = 0;
+        STARTUPINFOW si = { sizeof si };
+        PROCESS_INFORMATION pi;
+        if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            DestroyWindow(g_host);
+        } else {
+            announce(L"新版本下好了，重启一下 Clawd 就能用", 8000, 0);
+        }
+        break;
+    }
+    case UPD_INSTALL_FAILED:
+        announce(L"自动更新没成功，帮你打开下载页面了", 6000, 0);
+        ShellExecuteW(NULL, L"open", update_page(), NULL, NULL, SW_SHOWNORMAL);
+        break;
+    }
+}
+
 static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case WM_UPDATE:
+        on_update((int)wp, (int)lp);
+        return 0;
+
     case WM_TIMER:
         tick();
         return 0;
@@ -1179,7 +1258,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     if (argc >= 3 && !wcscmp(argv[1], L"--sheet")) return write_sheet(argv[2]);
     if (argc >= 3 && !wcscmp(argv[1], L"--cc")) return send_cc_event(argv[2]);
 
-    CreateMutexW(NULL, TRUE, L"ClawdPet.SingleInstance");
+    // Just updated: the old one is still on its way out, so wait for it.
+    int updated = argc >= 2 && !wcscmp(argv[1], L"--updated");
+    HANDLE one = CreateMutexW(NULL, TRUE, L"ClawdPet.SingleInstance");
+    for (int i = 0; updated && GetLastError() == ERROR_ALREADY_EXISTS && i < 50; i++) {
+        CloseHandle(one);
+        Sleep(100);
+        one = CreateMutexW(NULL, TRUE, L"ClawdPet.SingleInstance");
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1194,6 +1280,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
     g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
+    g_feat_update = reg_get_dword(L"FeatUpdate", 1) != 0;
+    g_update_next = GetTickCount64() + 60000;
     g_stair_style = clampi((int)reg_get_dword(L"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);
     g_pomo_focus = (int)reg_get_dword(L"PomoFocus", 25);
     if (g_pomo_focus < FOCUS_LO || g_pomo_focus > FOCUS_HI || g_pomo_focus % FOCUS_STEP) g_pomo_focus = 25;
@@ -1228,6 +1316,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
 
     for (int i = 0; i < count; i++) spawn_pet(0);
     tray_add();
+    if (updated) {
+        update_cleanup();
+        announce(L"更新好啦！现在是 v" CLAWD_VERSION, 5000, 1);
+    }
     SetTimer(g_host, 1, TICK_MS, NULL);
 
     MSG m;
