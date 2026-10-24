@@ -12,6 +12,7 @@
 #include "pet.h"
 #include "bubble.h"
 #include "picker.h"
+#include "wall.h"
 
 #define WM_TRAY    (WM_APP + 1)
 #define TICK_MS    33
@@ -30,7 +31,7 @@ enum {
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
-    IDM_CLI,
+    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -551,7 +552,8 @@ static int is_own_window(HWND h)
     wchar_t cls[32];
     GetClassNameW(h, cls, 32);
     return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS) ||
-           !wcscmp(cls, L"ClawdPicker") || !wcscmp(cls, L"ClawdStairs");
+           !wcscmp(cls, L"ClawdPicker") || !wcscmp(cls, L"ClawdStairs") || !wcscmp(cls, L"ClawdWall") ||
+           !wcscmp(cls, L"ClawdWallDraw");
 }
 
 // Monitor covered by a fullscreen foreground window (game, video, slides), or NULL.
@@ -662,7 +664,11 @@ static void tick(void)
         last_sec = now;
         every_second();
     }
-    if (n % 15 == 0) g_fs_mon = g_hide_fullscreen ? fullscreen_monitor() : NULL;
+    if (n % 15 == 0) {
+        g_fs_mon = g_hide_fullscreen ? fullscreen_monitor() : NULL;
+        walls_hide_on(g_fs_mon);
+    }
+    if (n % 60 == 0) walls_raise();   // the pets go back on top of them just below
 
     for (int i = 0; i < g_npets; i++) {
         PetWin *pw = g_pets[i];
@@ -738,6 +744,14 @@ static void set_size(int size)
     for (int i = 0; i < g_npets; i++) pet_set_scale(&g_pets[i]->pet, scale_for(size));
 }
 
+// Pets stand in front of walls, and the drawing hint can go.
+static void wall_drawn(void)
+{
+    if (g_npets) tb_hide(&g_pets[0]->tb);
+    for (int i = 0; i < g_npets; i++)
+        SetWindowPos(g_pets[i]->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 // Called by the picker's start button.
 static void pomo_start(int focus, int brk)
 {
@@ -797,6 +811,9 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
+    AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
+                L"放置围墙");
+    if (walls_count()) AppendMenuW(m, MF_STRING, IDM_WALL_CLEAR, L"拆掉所有围墙");
     if (g_feat_pomo || g_feat_water) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     if (g_feat_pomo && g_pomo) {
         HMENU pomo = CreatePopupMenu();
@@ -843,6 +860,13 @@ static void show_menu(PetWin *pw)
     case IDM_CLIMB:
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_climb(&g_pets[i]->pet);
+        break;
+    case IDM_WALL_DRAW:
+        announce(L"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消", 30000, 0);
+        walls_draw(scale_for(g_size), wall_drawn);
+        break;
+    case IDM_WALL_CLEAR:
+        walls_clear();
         break;
     case IDM_STAIRS_SLAB:
     case IDM_STAIRS_SOLID:
@@ -1021,6 +1045,7 @@ static int write_sheet(const wchar_t *path)
             static const uint32_t col[G_COUNT] = {
                 [G_Z] = 0xFFFFFF, [G_ZBIG] = 0xFFFFFF, [G_EXCL] = 0xFFD23F, [G_QUEST] = 0xFFFFFF,
                 [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF, [G_WIND] = 0xCFE8FF,
+                [G_STAR] = 0xFFD23F,
             };
             for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
                 if (x + glyph_width(g) > CW - 1) {
@@ -1132,6 +1157,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_msg_taskbar = RegisterWindowMessageW(L"TaskbarCreated");
     g_msg_cc = RegisterWindowMessageW(L"ClawdPet.CC");
     ChangeWindowMessageFilterEx(g_host, g_msg_cc, MSGFLT_ALLOW, NULL);
+    walls_register(inst, g_host);
+    walls_load();
 
     for (int i = 0; i < count; i++) spawn_pet(0);
     tray_add();

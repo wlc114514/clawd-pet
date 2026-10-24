@@ -12,8 +12,9 @@
 
 // Windows the pet floats in, highest first: bubbles above pets, and pets
 // above the Dock so they can stand on it.
-#define PET_LEVEL NSStatusWindowLevel
-#define POP_LEVEL (NSStatusWindowLevel + 1)
+#define PET_LEVEL  NSStatusWindowLevel
+#define POP_LEVEL  (NSStatusWindowLevel + 1)
+#define WALL_LEVEL (NSStatusWindowLevel - 1)   // below the pets, still above the Dock
 
 /* ---- screen geometry ---------------------------------------------------
  *
@@ -68,6 +69,19 @@ PetWindow *pet_window_pressed(void);              // the pet being dragged, or n
 - (void)invalidate;                              // force a redraw and re-place
 - (void)setHiddenByFullscreen:(BOOL)hidden;
 @end
+
+/* ---- walls ------------------------------------------------------------- */
+// Brick walls the user draws (menu: 放置围墙). Each stays until it is
+// right-clicked away; they are saved and handed to the pets.
+void walls_load(void);
+int  walls_count(void);
+BOOL walls_drawing(void);
+// Turns the screens into a canvas until one wall is drawn (drag), or Esc /
+// right-click; then calls done. scale: logical pixel size for the bricks.
+void walls_draw(int scale, void (^done)(void));
+void walls_clear(void);
+void walls_relayout(void);                          // the displays changed
+void walls_hide_on(NSSet<NSNumber *> *displays);    // displays behind a fullscreen window
 
 /* ---- pomodoro picker --------------------------------------------------- */
 @interface Picker : NSObject

@@ -10,6 +10,7 @@ enum {
     ST_LEAVE,  // being sent away: a reaction (see LEAVE_*), then drops through the taskbar
     ST_STARTLE,// cartoon leap backwards, freezing at the top
     ST_CLIMB,  // hopping up a staircase that pops out of the taskbar
+    ST_BUMP,   // walked into a wall: splat, stagger back, see stars
 };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
@@ -47,6 +48,13 @@ typedef struct {
 
 enum { STAIRS_SLAB, STAIRS_SOLID, STAIRS_OUTLINE, STAIRS_STYLES };
 
+// Brick walls the user draws on the screen, in logical pixels. A wall is
+// solid: the pet bumps into its sides and the bottom, and can stand on top.
+#define WALL_T    7      // thickness
+#define WALL_MIN  12     // shortest wall
+#define WALL_MAX  1200   // longest wall
+#define MAX_WALLS 32
+
 typedef struct {
     int n;                 // steps in this staircase, 0 = none
     int shown;             // steps that have started rising out of the taskbar
@@ -69,6 +77,8 @@ typedef struct {
     int gone;              // finished leaving; the window can be destroyed
     int dropped;           // event: just fell through the taskbar (cleared by the caller)
     int thrown;            // flying after being let go mid-drag (gets air drag)
+    int bonked;            // hit a wall in the air: dazed once it lands (+1 / -1 its side, 2 above)
+    int bump_side;         // ST_BUMP: which side the wall is on (0: it was overhead)
     int fan, fan_side, fan_t;   // desk fan out (too hot); which side (-1 left / +1 right); spin ticks
     int tap_t, tap_side;
     Stairs stairs;
@@ -102,6 +112,8 @@ void pet_climb(Pet *p);
 // STAIRS_CW x STAIRS_CH; sets c->w, c->h and the screen position of the
 // top-left corner.
 int  pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin);
+// The walls every pet collides with, as rectangles in screen pixels.
+void pet_set_walls(const RECT *walls, int n);
 POINT pet_head(const Pet *p);   // screen point just above the head
 
 Pose pose_stand(void);

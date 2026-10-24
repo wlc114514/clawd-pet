@@ -22,6 +22,17 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 
 #define HOP_TICKS 7
 
+// ST_BUMP timeline, in ticks: splat against the wall, stagger back, land, see stars.
+#define BUMP_HOP  4
+#define BUMP_LAND 12
+#define BUMP_DAZE 15
+#define BUMP_END  52
+
+// The pet's solid box, in canvas columns: arm tip to arm tip. It runs from
+// the top of the head (SPR_OY) down to the feet (FOOT_Y).
+#define BOX_L (SPR_OX + 1)
+#define BOX_R (SPR_OX + 17)
+
 /* ---- helpers ---------------------------------------------------------- */
 
 static unsigned rnd(Pet *p)
@@ -39,7 +50,89 @@ static int rr(Pet *p, int lo, int hi)
 
 // Physics constants are tuned for scale 4 and scaled from there.
 static double unit(const Pet *p) { return p->scale / 4.0; }
-static double ground_y(const Pet *p) { return p->area.bottom - p->perch - FOOT_Y * p->scale; }
+/* ---- walls ------------------------------------------------------------ */
+
+static RECT g_walls[MAX_WALLS];
+static int g_nwalls;
+
+void pet_set_walls(const RECT *walls, int n)
+{
+    if (n < 0) n = 0;
+    if (n > MAX_WALLS) n = MAX_WALLS;
+    if (n) memcpy(g_walls, walls, sizeof *walls * (size_t)n);
+    g_nwalls = n;
+}
+
+// Screen y of what a pet at x stands on, looking down from feet height
+// `from`: the taskbar, the floor it climbed up to, or the top of a wall
+// under its legs, whichever comes first.
+static double floor_at(const Pet *p, double x, double from)
+{
+    double f = p->area.bottom - p->perch;
+    double l = x + (SPR_OX + 4) * p->scale, r = x + (SPR_OX + 14) * p->scale;
+    for (int i = 0; i < g_nwalls; i++) {
+        const RECT *w = &g_walls[i];
+        if (l < w->right && r > w->left && w->top >= from - 1 && w->top < f) f = w->top;
+    }
+    return f;
+}
+
+static double ground_y(const Pet *p)
+{
+    return floor_at(p, p->x, p->y + FOOT_Y * p->scale) - FOOT_Y * p->scale;
+}
+
+// How far the pet can move sideways by dx before a wall stops it; *hit is
+// the side of the wall it ran into (-1 / +1), or 0.
+static double wall_dx(const Pet *p, double dx, int *hit)
+{
+    double k = p->scale, top = p->y + SPR_OY * k, bot = p->y + FOOT_Y * k;
+    double l = p->x + BOX_L * k, r = p->x + BOX_R * k;
+    *hit = 0;
+    for (int i = 0; i < g_nwalls; i++) {
+        const RECT *w = &g_walls[i];
+        if (bot <= w->top + 0.5 || top >= w->bottom - 0.5) continue;   // passes over or under it
+        if (dx > 0 && r <= w->left + 0.5 && r + dx > w->left) {
+            dx = w->left - r;
+            *hit = 1;
+        }
+        if (dx < 0 && l >= w->right - 0.5 && l + dx < w->right) {
+            dx = w->right - l;
+            *hit = -1;
+        }
+    }
+    return dx;
+}
+
+static int move_x(Pet *p, double dx)
+{
+    int hit;
+    p->x += wall_dx(p, dx, &hit);
+    return hit;
+}
+
+// A wall within gap px in direction dir.
+static int walled(const Pet *p, int dir, double gap)
+{
+    int hit;
+    wall_dx(p, dir * gap, &hit);
+    return hit;
+}
+
+// Rising: stops the head under a wall it would go through. Returns 1 if it did.
+static int bump_head(Pet *p, double head_was)
+{
+    double k = p->scale, l = p->x + BOX_L * k, r = p->x + BOX_R * k;
+    for (int i = 0; i < g_nwalls; i++) {
+        const RECT *w = &g_walls[i];
+        if (l < w->right - 0.5 && r > w->left + 0.5 && head_was >= w->bottom - 0.5 &&
+            p->y + SPR_OY * k < w->bottom) {
+            p->y = w->bottom - SPR_OY * k;
+            return 1;
+        }
+    }
+    return 0;
+}
 static double min_x(const Pet *p) { return p->area.left - (SPR_OX + 1) * p->scale; }
 static double max_x(const Pet *p) { return p->area.right - (SPR_OX + 17) * p->scale; }
 
@@ -108,6 +201,26 @@ static void spawn_wind(Pet *p)
     if (b) *b = (Bubble){ G_WIND, 11, 11, x, SPR_OY + rr(p, 1, 6), -p->fan_side * 0.9, 0, 0xCFE8FFu };
 }
 
+// Stars flying off where it hit a wall: side -1 / +1, or 0 for overhead.
+static void spawn_bonk(Pet *p, int side)
+{
+    double x = side > 0 ? SPR_OX + 17 : side < 0 ? SPR_OX - 2 : SPR_OX + 8;
+    double y = side ? SPR_OY + 1 : SPR_OY - 4;
+    Bubble *b;
+    if ((b = new_bubble(p))) *b = (Bubble){ G_STAR, 10, 10, x, y, side * 0.2 - 0.25 * !side, -0.35, C_EXCL };
+    if ((b = new_bubble(p))) *b = (Bubble){ G_STAR, 8, 8, x, y + 3, side * 0.3 + 0.25 * !side, 0.1, C_EXCL };
+}
+
+// Stars circling its head while it is dazed.
+static void spawn_orbit(Pet *p)
+{
+    for (int i = 0; i < 2; i++) {
+        double a = p->t * 0.35 + i * 3.14159265;
+        Bubble *b = new_bubble(p);
+        if (b) *b = (Bubble){ G_STAR, 2, 2, SPR_OX + 8 + 7 * cos(a), SPR_OY - 5 + 2 * sin(a), 0, 0, C_EXCL };
+    }
+}
+
 static void spawn_sob(Pet *p, int life)
 {
     Bubble *b = new_bubble(p);
@@ -143,15 +256,27 @@ static double step_top(const Pet *p, int i)
 // is already perched on) that its head and bubbles would leave the screen.
 static int stairs_room(const Pet *p, int dir)
 {
-    double k = p->scale, c = p->x + (SPR_OX + 9) * k;
+    double k = p->scale, c = p->x + (SPR_OX + 9) * k, floor = p->y + FOOT_Y * k;
     double room = dir > 0 ? p->area.right - 8 * k - c : c - (p->area.left + 8 * k);
     int n = room > 0 ? (int)(room / (STEP_W * k)) : 0;
     double rise = (p->area.bottom - p->area.top) / 2.0;
-    double headroom = p->area.bottom - p->perch - p->area.top - (FOOT_Y + 10) * k;
+    double headroom = floor - p->area.top - (FOOT_Y + 10) * k;
     if (rise > headroom) rise = headroom;
     int tall = rise > 0 ? (int)(rise / (STEP_H * k)) : 0;
     if (n > tall) n = tall;
-    return n > MAX_STEPS ? MAX_STEPS : n;
+    if (n > MAX_STEPS) n = MAX_STEPS;
+
+    // Stop short of any wall: no step, nor the pet hopping onto it, may go
+    // through one.
+    for (int i = 0; i < n; i++) {
+        double sx = c + dir * (5 + i * STEP_W + STEP_W / 2.0) * k, top = floor - (i + 1) * STEP_H * k;
+        double l = sx - 9 * k, r = sx + 9 * k, t = top - (FOOT_Y - SPR_OY + 5) * k;
+        for (int j = 0; j < g_nwalls; j++) {
+            const RECT *w = &g_walls[j];
+            if (l < w->right && r > w->left && t < w->bottom && floor - 0.5 > w->top) return i;
+        }
+    }
+    return n;
 }
 
 static void stairs_crumble(Pet *p)
@@ -332,6 +457,32 @@ static Pose pose_startle(int look)
     return q;
 }
 
+// Splat: just ran face first into a wall on `side`.
+static Pose pose_splat(int side)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_CLOSED;
+    q.squash = 1;
+    q.look = side;
+    q.body_dy = 1;
+    if (side > 0) q.arm_r = -3;
+    else q.arm_l = -3;
+    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    return q;
+}
+
+// Slumped and seeing stars.
+static Pose pose_dazed(int t)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_DIZZY;
+    q.body_dy = 1;
+    q.arm_l = q.arm_r = 1;
+    q.look = (t / 6) % 2 ? 1 : -1;
+    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    return q;
+}
+
 static Pose pose_wave(int phase)
 {
     Pose q = pose_stand();
@@ -350,6 +501,7 @@ int pet_demo_poses(Pose *out, int max)
         pose_type(0), pose_type(-1), pose_type(1), pose_wave(0), pose_wave(1),
         pose_shock(0), pose_shock(8), pose_shock(14), pose_startle(-1),
         pose_shiver(), pose_cry(0), pose_cry(5), pose_panic(0, 1), pose_panic(3, 1),
+        pose_splat(1), pose_dazed(0),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
@@ -368,7 +520,7 @@ void pet_init(Pet *p, int scale, unsigned seed)
     p->scale = scale;
     plat_work_area(&p->area, &p->screen);
     p->x = min_x(p) + rr(p, 0, (int)(max_x(p) - min_x(p)));
-    p->y = ground_y(p);
+    p->y = p->area.bottom - FOOT_Y * p->scale;
     p->dir = 1;
     p->blink_t = rr(p, 30, 90);
     set_state(p, ST_IDLE, 45);
@@ -399,6 +551,7 @@ void pet_begin_drag(Pet *p, POINT grab)
     if (p->state == ST_LEAVE) return;   // no rescuing it mid-fall
     if (p->state == ST_CLIMB) stairs_crumble(p);
     p->perch = 0;                       // let go and it lands on the taskbar
+    p->bonked = 0;
     p->drag_dx = grab.x - (int)p->x;
     p->drag_dy = grab.y - (int)p->y;
     p->vx = p->vy = 0;
@@ -521,7 +674,7 @@ void pet_climb(Pet *p)
     s->crumble_t = -1;
     p->y = ground_y(p);
     s->x0 = p->x + (SPR_OX + 9) * k + dir * 5 * k;
-    s->base = p->area.bottom - p->perch;   // the taskbar, or the height it already climbed to
+    s->base = p->y + FOOT_Y * k;   // the taskbar, a wall, or the height it already climbed to
     for (int i = 0; i < n; i++) s->off[i] = (i + 1) * STEP_H;
     s->shown = 1;
 
@@ -608,6 +761,21 @@ int pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin)
     return 1;
 }
 
+// Ran into a wall on `side` (0: overhead). Starts ST_BUMP at tick t, so a
+// pet that hit one in the air can skip straight to seeing stars.
+static void start_bump(Pet *p, int side, int t)
+{
+    p->vx = p->vy = 0;
+    p->following = 0;
+    p->forced_sleep = 0;
+    p->bump_side = side;
+    if (side) p->dir = side;
+    p->hop_x = p->x;
+    p->hop_y = p->y;
+    set_state(p, ST_BUMP, 0);
+    p->t = t;
+}
+
 void pet_update(Pet *p, const World *w)
 {
     double u = unit(p);
@@ -618,9 +786,10 @@ void pet_update(Pet *p, const World *w)
 
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
-        p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB) {
-        if (p->y < gy - 0.5) {
-            p->vx = p->vy = 0;
+        p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP) {
+        if (p->y < gy - 0.5) {   // walked off the end of a wall: keep going a little
+            p->vx = p->state == ST_WALK || p->state == ST_FLEE ? p->dir * 1.5 * u : 0;
+            p->vy = 0;
             set_state(p, ST_FALL, 0);
         } else {
             p->y = gy;
@@ -631,7 +800,7 @@ void pet_update(Pet *p, const World *w)
     // Cursor relative to the pet: horizontal offset from the sprite centre,
     // and height above the floor it stands on.
     double dxm = w->cursor.x - (p->x + (SPR_OX + 9) * p->scale);
-    double dym = p->area.bottom - p->perch - w->cursor.y;
+    double dym = gy + FOOT_Y * p->scale - w->cursor.y;
     int cursor_live = w->cursor_still_ms < 3000;
     int hover = fabs(dxm) < 9 * p->scale && dym >= 0 && dym < 12 * p->scale;
 
@@ -681,7 +850,8 @@ void pet_update(Pet *p, const World *w)
 
         if (w->mouse_mode == MOUSE_FOLLOW && w->heat < 2 && fabs(dxm) > 70 * u) {
             int dir = dxm > 0 ? 1 : -1;
-            int at_wall = (dir < 0 && p->x <= min_x(p) + 1) || (dir > 0 && p->x >= max_x(p) - 1);
+            int at_wall = (dir < 0 && p->x <= min_x(p) + 1) || (dir > 0 && p->x >= max_x(p) - 1) ||
+                          walled(p, dir, 2);
             if (!at_wall) {
                 p->dir = dir;
                 p->following = 1;
@@ -712,6 +882,7 @@ void pet_update(Pet *p, const World *w)
             if (r < walk_pct) {
                 double span = max_x(p) - min_x(p), pos = (p->x - min_x(p)) / span;
                 p->dir = pos < 0.15 ? 1 : pos > 0.85 ? -1 : (rr(p, 0, 1) ? 1 : -1);
+                if (walled(p, p->dir, 40 * p->scale) && rr(p, 0, 2)) p->dir = -p->dir;   // mostly
                 p->following = 0;
                 set_state(p, ST_WALK, rr(p, 60, 240));
             } else if (r < walk_pct + 8) {
@@ -728,7 +899,13 @@ void pet_update(Pet *p, const World *w)
         // Busier CPU, faster Clawd (up to 3x).
         double speed = (p->following ? 2.6 : 1.6) * (1 + 2 * w->cpu) * u;
         if (p->following) p->dir = dxm > 0 ? 1 : -1;
-        p->x += p->dir * speed;
+        int hit = move_x(p, p->dir * speed);
+        if (hit) {
+            spawn_bonk(p, hit);
+            start_bump(p, hit, 0);
+            q = pose_splat(hit);
+            break;
+        }
         if (!p->following) {
             if (p->x <= min_x(p)) p->dir = 1;
             if (p->x >= max_x(p)) p->dir = -1;
@@ -754,7 +931,8 @@ void pet_update(Pet *p, const World *w)
 
     case ST_FLEE: {
         p->dir = dxm > 0 ? -1 : 1;
-        int cornered = (p->dir < 0 && p->x <= min_x(p) + 1) || (p->dir > 0 && p->x >= max_x(p) - 1);
+        int cornered = (p->dir < 0 && p->x <= min_x(p) + 1) || (p->dir > 0 && p->x >= max_x(p) - 1) ||
+                       walled(p, p->dir, 2);
         if (cornered) {
             // Nowhere left to run: leap over the cursor.
             p->vx = -p->dir * 9 * u;
@@ -764,7 +942,7 @@ void pet_update(Pet *p, const World *w)
             q = pose_air(1);
             break;
         }
-        p->x += p->dir * 4.5 * u;
+        move_x(p, p->dir * 4.5 * u);
         clamp_walls(p, 0);
         q = pose_walk((p->t / 2) % 4, p->dir);
         q.eyes = EYE_WIDE;
@@ -806,17 +984,32 @@ void pet_update(Pet *p, const World *w)
 
     case ST_FALL:
     case ST_JUMP:
-    case ST_STARTLE:
+    case ST_STARTLE: {
         if (p->state == ST_STARTLE && p->vy >= 0 && p->dur > 0) {
             p->dur--;   // cartoon freeze at the top of the leap
             q = pose_startle(p->look);
             break;
         }
+        double k = p->scale, feet_was = p->y + FOOT_Y * k, head_was = p->y + SPR_OY * k;
         p->vy += 1.0 * u;
         if (p->vy > 40 * u) p->vy = 40 * u;
         if (p->thrown) p->vx *= 0.965;   // gentle air drag: half the speed gone in ~1 s
-        p->x += p->vx;
+        int hit = move_x(p, p->vx);
+        if (hit) {   // bounce off the side of a wall; dazed after landing if it was hard
+            if (fabs(p->vx) > 6 * u) {
+                p->bonked = hit;
+                spawn_bonk(p, hit);
+            }
+            p->vx = -p->vx * 0.5;
+        }
         p->y += p->vy;
+        if (p->vy < 0 && bump_head(p, head_was)) {
+            if (p->vy < -6 * u) {
+                p->bonked = 2;
+                spawn_bonk(p, 0);
+            }
+            p->vy = 1.0 * u;
+        }
         clamp_walls(p, 0.6);
         if (p->y < p->area.top - SPR_OY * p->scale) {
             p->y = p->area.top - SPR_OY * p->scale;
@@ -825,20 +1018,39 @@ void pet_update(Pet *p, const World *w)
         q = p->state == ST_JUMP    ? pose_hop(p->vy < 0)
           : p->state == ST_STARTLE ? pose_startle(p->look)
           : pose_air(p->vy < 0);
-        if (p->y >= gy) {
+        if (p->bonked) q.eyes = EYE_DIZZY;
+        double fy = floor_at(p, p->x, feet_was) - FOOT_Y * k;
+        if (p->y >= fy) {
             int hard = p->vy > 20 * u;
-            p->y = gy;
+            p->y = fy;
             p->vy = 0;
             p->thrown = 0;
+            if (p->bonked) {
+                start_bump(p, p->bonked == 2 ? 0 : p->bonked, BUMP_LAND);
+                p->bonked = 0;
+                q = pose_land(1);
+                q.eyes = EYE_DIZZY;
+                break;
+            }
             set_state(p, ST_LAND, hard ? 10 : 5);
             q = pose_land(hard);
         }
         break;
+    }
 
     case ST_LAND:
         // Squash on impact, then skid to a stop rather than halting dead.
         p->vx *= 0.8;
-        p->x += p->vx;
+        {
+            int hit = move_x(p, p->vx);
+            if (hit && fabs(p->vx) > 4 * u) {   // skidded into a wall
+                spawn_bonk(p, hit);
+                start_bump(p, hit, 0);
+                q = pose_splat(hit);
+                break;
+            }
+            if (hit) p->vx = 0;
+        }
         clamp_walls(p, 0);
         q = p->t < p->dur ? pose_land(p->dur > 5) : pose_stand();
         if (++p->t >= p->dur && fabs(p->vx) < 0.5 * u) {
@@ -893,6 +1105,52 @@ void pet_update(Pet *p, const World *w)
         break;
     }
 
+    case ST_BUMP: {
+        double k = p->scale;
+        int side = p->bump_side;
+        if (p->t < BUMP_HOP) {            // splat
+            q = pose_splat(side);
+            p->shake = side && p->t % 2 ? -side : 0;
+        } else if (p->t < BUMP_LAND) {    // stagger back off it in a little hop
+            double f = (double)(p->t - BUMP_HOP + 1) / (BUMP_LAND - BUMP_HOP);
+            if (side) move_x(p, -side * 1.25 * k);
+            clamp_walls(p, 0);
+            p->y = p->hop_y - 20 * k * f * (1 - f);
+            q = pose_air(f < 0.5);
+            q.eyes = EYE_DIZZY;
+            q.look = side;
+        } else {
+            p->y = p->hop_y;
+            if (p->y < ground_y(p) - 0.5) {   // staggered off the end of a wall
+                p->vx = p->vy = 0;
+                p->bonked = side ? side : 2;
+                set_state(p, ST_FALL, 0);
+                q = pose_air(0);
+                q.eyes = EYE_DIZZY;
+                break;
+            }
+            if (p->t < BUMP_DAZE) {
+                q = pose_land(1);
+                q.eyes = EYE_DIZZY;
+            } else if (p->t < BUMP_END - 10) {
+                q = pose_dazed(p->t);
+                int sway = (p->t / 4) % 4;
+                p->shake = sway == 1 ? 1 : sway == 3 ? -1 : 0;
+                spawn_orbit(p);
+            } else {                      // shake it off
+                q = pose_stand();
+                q.eyes = EYE_CLOSED;
+                q.look = (p->t / 2) % 2 ? 1 : -1;
+            }
+        }
+        if (++p->t >= BUMP_END) {         // and off it goes, the other way
+            p->dir = side ? -side : (rr(p, 0, 1) ? 1 : -1);
+            if (p->paused || w->heat > 1) set_state(p, ST_IDLE, rr(p, 40, 120));
+            else set_state(p, ST_WALK, rr(p, 30, 90));
+        }
+        break;
+    }
+
     case ST_SLEEP:
         q = pose_sleep((p->t / 40) % 2);
         if (p->t % 45 == 0) spawn_z(p);
@@ -936,7 +1194,7 @@ void pet_update(Pet *p, const World *w)
                 break;
             case LEAVE_PANIC:
                 if (rr(p, 0, 14) == 0) p->dir = -p->dir;
-                p->x += p->dir * 5 * u;
+                if (move_x(p, p->dir * 5 * u)) p->dir = -p->dir;
                 if (p->x <= min_x(p)) p->dir = 1;
                 if (p->x >= max_x(p)) p->dir = -1;
                 clamp_walls(p, 0);

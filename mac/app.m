@@ -29,7 +29,7 @@ enum {
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
-    IDM_CLI,
+    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -388,6 +388,7 @@ static void check_fullscreen(void)
         }
     }
     g_fs = fs;
+    walls_hide_on(fs);
 }
 
 /* ---- menu bar icon ---------------------------------------------------- */
@@ -452,6 +453,7 @@ static int write_sheet(const char *path)
             static const uint32_t col[G_COUNT] = {
                 [G_Z] = 0xFFFFFF, [G_ZBIG] = 0xFFFFFF, [G_EXCL] = 0xFFD23F, [G_QUEST] = 0xFFFFFF,
                 [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF, [G_WIND] = 0xCFE8FF,
+                [G_STAR] = 0xFFD23F,
             };
             for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
                 if (x + glyph_width(g) > CW - 1) {
@@ -559,6 +561,7 @@ static int write_sheet(const char *path)
         dispatch_resume(g_cc_src);
     }
 
+    walls_load();
     for (int i = 0; i < count; i++) [self spawnPet:NO];
     check_fullscreen();
 
@@ -582,6 +585,7 @@ static int write_sheet(const char *path)
     (void)note;
     mac_screens_changed();
     for (PetWindow *pw in g_pets) [pw invalidate];
+    walls_relayout();
     check_fullscreen();
 }
 
@@ -817,6 +821,8 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
     if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb, self);
+    add_item(m, @"放置围墙", IDM_WALL_DRAW, NO, walls_count() < MAX_WALLS && !walls_drawing(), self);
+    if (walls_count()) add_item(m, @"拆掉所有围墙", IDM_WALL_CLEAR, NO, YES, self);
     if (g_feat_pomo || g_feat_water) [m addItem:[NSMenuItem separatorItem]];
 
     if (g_feat_pomo && g_pomo) {
@@ -886,6 +892,15 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     case IDM_CLIMB:
         for (PetWindow *p in g_pets)
             if (!pw || p == pw) pet_climb(p.pet);
+        break;
+    case IDM_WALL_DRAW:
+        [self announce:@"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消" ms:30000 cheer:NO];
+        walls_draw(scale_for(g_size), ^{
+            if (g_pets.count) [g_pets[0].bubble hide];
+        });
+        break;
+    case IDM_WALL_CLEAR:
+        walls_clear();
         break;
     case IDM_STAIRS_SLAB:
     case IDM_STAIRS_SOLID:

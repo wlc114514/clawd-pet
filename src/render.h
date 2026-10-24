@@ -14,9 +14,9 @@
 #define COL_KB   0xFF5C5C5Cu
 #define COL_KEY  0xFFC8C8C8u
 
-enum { EYE_OPEN, EYE_CLOSED, EYE_HAPPY, EYE_WIDE };
+enum { EYE_OPEN, EYE_CLOSED, EYE_HAPPY, EYE_WIDE, EYE_DIZZY };
 enum { PROP_NONE, PROP_KEYBOARD };
-enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_COUNT };
+enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_STAR, G_COUNT };
 
 #define FAN_W 7    // desk fan prop, drawn standing on the floor beside the pet
 #define FAN_H 10
@@ -38,6 +38,8 @@ void cv_clear(Canvas *c);
 void draw_clawd(Canvas *c, int ox, int oy, const Pose *p);
 // Fan with its top-left at (x, y); frame alternates the blades (+ / x).
 void draw_fan(Canvas *c, int x, int y, int frame);
+// Fills all of c (c->w by c->h) with red brick, courses along its longer side.
+void draw_wall(Canvas *c);
 int  glyph_width(int g);
 void draw_glyph(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha);
 // Nearest-neighbour upscale by k into dst (c->w*k by c->h*k), premultiplied ARGB.

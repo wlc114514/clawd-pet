@@ -80,8 +80,43 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
         case EYE_WIDE:
             rect(c, out < 0 ? x - 1 : x, ey, out < 0 ? x : x + 1, ey + 1, COL_EYE);
             break;
+        case EYE_DIZZY:   // x x
+            for (int d = -1; d <= 1; d += 2) {
+                put(c, x + d, ey, COL_EYE);
+                put(c, x + d, ey + 2, COL_EYE);
+            }
+            put(c, x, ey + 1, COL_EYE);
+            break;
         }
     }
+}
+
+/*
+ * Red brick laid in courses three rows deep (two of brick, one of mortar)
+ * along the length of the wall, each brick eight long with the joints
+ * staggered by half a brick, inside a dark outline.
+ */
+void draw_wall(Canvas *c)
+{
+    static const uint32_t shade[3] = { 0xFFB5482Fu, 0xFFA23E28u, 0xFFC0573Au };
+    int along_x = c->w >= c->h;
+    for (int y = 0; y < c->h; y++)
+        for (int x = 0; x < c->w; x++) {
+            uint32_t col;
+            if (x == 0 || y == 0 || x == c->w - 1 || y == c->h - 1) {
+                col = 0xFF3E1A12u;
+            } else {
+                int a = (along_x ? x : y) - 1, b = (along_x ? y : x) - 1;   // along / across the courses
+                int course = b / 3, row = b % 3, ia = a + (course % 2) * 4;
+                if (row == 2 || ia % 8 == 7)
+                    col = 0xFFD8CCB8u;   // mortar
+                else if (row == 0)
+                    col = 0xFFD06A4Au;   // lit edge of a brick
+                else
+                    col = shade[(unsigned)(course * 7 + ia / 8 * 13) % 3];
+            }
+            c->px[y * c->w + x] = col;
+        }
 }
 
 /*
@@ -121,6 +156,7 @@ static const Glyph GLYPHS[G_COUNT] = {
     [G_DROP]  = { 3, 4, 0, { ".#.", "###", "###", ".#." } },
     [G_TEAR]  = { 1, 1, 1, { "#" } },
     [G_WIND]  = { 3, 1, 1, { "###" } },
+    [G_STAR]  = { 3, 3, 0, { ".#.", "###", ".#." } },
     [G_SOB]   = { 9, 9, 0, {   // loudly crying face
         "..YYYYY..",
         ".YYYYYYY.",
