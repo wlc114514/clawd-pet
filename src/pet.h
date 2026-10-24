@@ -25,6 +25,7 @@ typedef struct {
     int mouse_mode;    // MOUSE_*
     int cc;            // CC_*
     int climb;         // may climb stairs on its own
+    int heat;          // 0 fine, 1 warm: sweats, 2 hot: sweats more and fans itself
 } World;
 
 typedef struct {

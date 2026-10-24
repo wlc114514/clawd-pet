@@ -676,7 +676,8 @@ void pet_update(Pet *p, const World *w)
                 break;
             }
         }
-        if (w->cpu > 0.8 && p->t % 90 == 45) spawn_drop(p);
+        if (w->heat && p->t % (w->heat > 1 ? 30 : 90) == 15) spawn_drop(p);
+        if (w->heat > 1) q.arm_r = (p->t / 2) % 2 ? -4 : -2;   // fanning itself
         if (++p->t >= p->dur) {
             if (p->perch && GetTickCount64() >= p->perch_until) {   // seen enough: jump down
                 say(p, G_HEART, C_HEART);
@@ -722,7 +723,7 @@ void pet_update(Pet *p, const World *w)
         int period = speed > 3.5 * u ? 2 : speed > 2.2 * u ? 3 : 5;
         q = pose_walk((p->t / period) % 4, p->dir);
         if (blinking) q.eyes = EYE_CLOSED;
-        if (w->cpu > 0.8 && p->t % 60 == 30) spawn_drop(p);
+        if (w->heat && p->t % (w->heat > 1 ? 20 : 60) == 10) spawn_drop(p);
         p->t++;
 
         int done = p->following

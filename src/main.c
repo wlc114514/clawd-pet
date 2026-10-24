@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -504,6 +506,46 @@ static double sample_cpu(void)
     return busy < 0 ? 0 : busy > 1 ? 1 : busy;
 }
 
+// Hottest ACPI thermal zone in °C via the "Thermal Zone Information"
+// performance counter (no admin needed), or -1 if there is none.
+static double sample_temp(void)
+{
+    static PDH_HQUERY q;
+    static PDH_HCOUNTER c;
+    static int ok = -1;
+    if (ok < 0)
+        ok = PdhOpenQueryW(NULL, 0, &q) == ERROR_SUCCESS &&
+             PdhAddEnglishCounterW(q, L"\\Thermal Zone Information(*)\\Temperature", 0, &c) == ERROR_SUCCESS;
+    if (!ok || PdhCollectQueryData(q) != ERROR_SUCCESS) return -1;
+
+    DWORD sz = 0, n = 0;
+    PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &sz, &n, NULL);
+    PDH_FMT_COUNTERVALUE_ITEM_W *items = sz ? malloc(sz) : NULL;
+    double best = -1;
+    if (items && PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &sz, &n, items) == ERROR_SUCCESS)
+        for (DWORD i = 0; i < n; i++) {
+            double t = items[i].FmtValue.doubleValue - 273.15;   // reported in kelvin
+            if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA && t > best && t < 150) best = t;
+        }
+    free(items);
+    return best;
+}
+
+// How hot Clawd feels (World.heat). Goes by temperature, with a few degrees
+// of hysteresis; on machines whose thermal zones never read like a CPU
+// (missing, or stuck at room temperature) by CPU load instead.
+static int sample_heat(void)
+{
+    static int trusted, level;
+    double t = sample_temp();
+    if (t >= 45) trusted = 1;
+    if (!trusted || t < 0) return g_world.cpu > 0.8;
+    int up = t >= 85 ? 2 : t >= 75 ? 1 : 0, down = t >= 82 ? 2 : t >= 72 ? 1 : 0;
+    if (up > level) level = up;
+    else if (down < level) level = down;
+    return level;
+}
+
 static int is_own_window(HWND h)
 {
     wchar_t cls[32];
@@ -582,6 +624,7 @@ static void every_second(void)
 {
     ULONGLONG now = GetTickCount64();
     g_world.cpu = g_world.cpu * 0.5 + sample_cpu() * 0.5;
+    g_world.heat = sample_heat();
 
     if (g_cc && now >= g_cc_until) g_cc = CLAUDE_IDLE;
 
