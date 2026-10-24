@@ -55,6 +55,7 @@ build.bat
 | 命令 | 作用 |
 |---|---|
 | `clawd.exe` | 启动桌宠（只允许一个实例） |
+| `clawd` | 右键菜单勾上「终端里可用 clawd 命令」后，新开的终端里直接敲 `clawd` 就能启动（参数照传）。它在 `%LOCALAPPDATA%\ClawdPet\bin` 放一个 `clawd.cmd`，只把这个目录加进用户 PATH；取消勾选会全部删掉 |
 | `clawd.exe --cc <prompt\|tool\|permission\|stop\|end>` | 给运行中的桌宠发 Claude Code 事件 |
 | `clawd.exe --sheet out.bmp` | 把所有姿势导出成一张图，调像素画用 |
 

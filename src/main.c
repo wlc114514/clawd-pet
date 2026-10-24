@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@ enum {
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
+    IDM_CLI,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -125,6 +127,132 @@ static void autostart_set(int on)
     wcscpy(cmd + 1, path);
     wcscat(cmd, L"\"");
     RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, APP_NAME, REG_SZ, cmd, (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
+}
+
+/* ---- `clawd` command -------------------------------------------------- */
+
+// A clawd.cmd in its own folder that launches this exe, with only that
+// folder on the user PATH, so nothing else next to the exe becomes a command.
+#define CLI_DIR_RAW L"%LOCALAPPDATA%\\ClawdPet\\bin"
+#define ENV_KEY     L"Environment"
+
+static void cli_paths(wchar_t *dir, wchar_t *cmd)
+{
+    ExpandEnvironmentStringsW(CLI_DIR_RAW, dir, MAX_PATH);
+    _snwprintf(cmd, MAX_PATH, L"%ls\\clawd.cmd", dir);
+    cmd[MAX_PATH - 1] = 0;
+}
+
+// The user PATH, unexpanded (caller frees). Empty string if there is none.
+static wchar_t *user_path_get(void)
+{
+    DWORD sz = 0;
+    DWORD flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    RegGetValueW(HKEY_CURRENT_USER, ENV_KEY, L"Path", flags, NULL, NULL, &sz);
+    wchar_t *v = calloc(sz / sizeof(wchar_t) + 1, sizeof(wchar_t));
+    if (sz && RegGetValueW(HKEY_CURRENT_USER, ENV_KEY, L"Path", flags, NULL, v, &sz) != ERROR_SUCCESS) v[0] = 0;
+    return v;
+}
+
+static int is_cli_entry(const wchar_t *e, size_t n, const wchar_t *dir)
+{
+    while (n && e[n - 1] == L'\\') n--;
+    return (n == wcslen(CLI_DIR_RAW) && !_wcsnicmp(e, CLI_DIR_RAW, n)) ||
+           (n == wcslen(dir) && !_wcsnicmp(e, dir, n));
+}
+
+// Adds or removes our folder in the user PATH, keeping every other entry.
+static int user_path_set(int add)
+{
+    wchar_t dir[MAX_PATH], cmd[MAX_PATH];
+    cli_paths(dir, cmd);
+    wchar_t *old = user_path_get();
+    size_t cap = wcslen(old) + wcslen(CLI_DIR_RAW) + 2;
+    wchar_t *out = calloc(cap, sizeof(wchar_t));
+    int found = 0;
+    for (wchar_t *e = old; *e;) {
+        wchar_t *semi = wcschr(e, L';');
+        size_t n = semi ? (size_t)(semi - e) : wcslen(e);
+        if (is_cli_entry(e, n, dir)) found = 1;
+        else if (n) {
+            if (*out) wcscat(out, L";");
+            wcsncat(out, e, n);
+        }
+        e += n + (semi != NULL);
+    }
+    if (add) {
+        if (*out) wcscat(out, L";");
+        wcscat(out, CLI_DIR_RAW);
+    }
+    int changed = add || found;
+    if (changed) {
+        RegSetKeyValueW(HKEY_CURRENT_USER, ENV_KEY, L"Path", REG_EXPAND_SZ, out,
+                        (DWORD)((wcslen(out) + 1) * sizeof(wchar_t)));
+        // Tell Explorer, so terminals opened from now on see it.
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)ENV_KEY, SMTO_ABORTIFHUNG, 1000, NULL);
+    }
+    free(old);
+    free(out);
+    return found;
+}
+
+static int cli_enabled(void)
+{
+    wchar_t dir[MAX_PATH], cmd[MAX_PATH];
+    cli_paths(dir, cmd);
+    if (GetFileAttributesW(cmd) == INVALID_FILE_ATTRIBUTES) return 0;
+    wchar_t *path = user_path_get();
+    int on = 0;
+    for (wchar_t *e = path; *e && !on;) {
+        wchar_t *semi = wcschr(e, L';');
+        size_t n = semi ? (size_t)(semi - e) : wcslen(e);
+        on = is_cli_entry(e, n, dir);
+        e += n + (semi != NULL);
+    }
+    free(path);
+    return on;
+}
+
+// (Re)writes clawd.cmd to point at wherever this exe is now.
+static int cli_write_shim(void)
+{
+    wchar_t dir[MAX_PATH], cmd[MAX_PATH], exe[MAX_PATH], shortexe[MAX_PATH];
+    cli_paths(dir, cmd);
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+
+    // cmd.exe reads batch files in the OEM code page; fall back to the 8.3
+    // name for paths it can't spell.
+    char path[MAX_PATH * 2], text[MAX_PATH * 2 + 128];
+    BOOL lossy = FALSE;
+    WideCharToMultiByte(CP_OEMCP, 0, exe, -1, path, sizeof path, NULL, &lossy);
+    if (lossy && GetShortPathNameW(exe, shortexe, MAX_PATH))
+        WideCharToMultiByte(CP_OEMCP, 0, shortexe, -1, path, sizeof path, NULL, NULL);
+    int len = snprintf(text, sizeof text,
+                       "@echo off\r\nrem Made by Clawd (menu: clawd command). Launches the desktop pet.\r\n"
+                       "start \"\" \"%s\" %%*\r\n", path);
+
+    SHCreateDirectoryExW(NULL, dir, NULL);
+    HANDLE f = CreateFileW(cmd, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    DWORD wrote;
+    WriteFile(f, text, (DWORD)len, &wrote, NULL);
+    CloseHandle(f);
+    return 1;
+}
+
+static void cli_set(int on)
+{
+    wchar_t dir[MAX_PATH], cmd[MAX_PATH];
+    cli_paths(dir, cmd);
+    if (on) {
+        if (cli_write_shim()) user_path_set(1);
+        return;
+    }
+    DeleteFileW(cmd);
+    RemoveDirectoryW(dir);   // and ClawdPet\, if nothing else is in them
+    *wcsrchr(dir, L'\\') = 0;
+    RemoveDirectoryW(dir);
+    user_path_set(0);
 }
 
 /* ---- drawing ---------------------------------------------------------- */
@@ -642,6 +770,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_POPUP, (UINT_PTR)feat, L"功能开关");
     AppendMenuW(m, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
     AppendMenuW(m, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
+    AppendMenuW(m, MF_STRING | CHECK(cli_enabled()), IDM_CLI, L"终端里可用 clawd 命令");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
 
@@ -729,6 +858,14 @@ static void show_menu(PetWin *pw)
     case IDM_FULLSCREEN:
         g_hide_fullscreen = !g_hide_fullscreen;
         reg_set_dword(L"HideFullscreen", (DWORD)g_hide_fullscreen);
+        break;
+    case IDM_CLI:
+        if (cli_enabled()) {
+            cli_set(0);
+        } else {
+            cli_set(1);
+            if (cli_enabled()) announce(L"新开一个终端，\n输入 clawd 就能叫我出来", 6000, 0);
+        }
         break;
     case IDM_AUTOSTART:
         autostart_set(!autostart_enabled());
@@ -909,6 +1046,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dpi = GetDpiForSystem();
+    if (cli_enabled()) cli_write_shim();   // follow the exe if it was moved
     g_size = clampi((int)reg_get_dword(L"Size", 1), 0, 2, 1);
     g_mouse_mode = clampi((int)reg_get_dword(L"MouseMode", MOUSE_OFF), 0, 2, MOUSE_OFF);
     g_typing_on = reg_get_dword(L"Typing", 1) != 0;
