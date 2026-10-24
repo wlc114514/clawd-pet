@@ -797,10 +797,7 @@ void pet_update(Pet *p, const World *w)
         }
         p->vy += 1.0 * u;
         if (p->vy > 40 * u) p->vy = 40 * u;
-        if (p->thrown) {   // air drag, stronger the faster it goes
-            double drag = 0.03 + 0.004 * fabs(p->vx) / u;
-            p->vx *= 1 - (drag > 0.15 ? 0.15 : drag);
-        }
+        if (p->thrown) p->vx *= 0.965;   // gentle air drag: half the speed gone in ~1 s
         p->x += p->vx;
         p->y += p->vy;
         clamp_walls(p, 0.6);
@@ -822,11 +819,12 @@ void pet_update(Pet *p, const World *w)
         break;
 
     case ST_LAND:
-        p->vx *= 0.65;
+        // Squash on impact, then skid to a stop rather than halting dead.
+        p->vx *= 0.8;
         p->x += p->vx;
         clamp_walls(p, 0);
-        q = pose_land(p->dur > 5);
-        if (++p->t >= p->dur) {
+        q = p->t < p->dur ? pose_land(p->dur > 5) : pose_stand();
+        if (++p->t >= p->dur && fabs(p->vx) < 0.5 * u) {
             p->vx = 0;
             set_state(p, ST_IDLE, rr(p, 40, 120));
         }
