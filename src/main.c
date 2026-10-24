@@ -37,7 +37,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -80,6 +80,8 @@ static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscr
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
 static int g_feat_update = 1;   // look for a new version now and then
+static int g_focus;              // focus mode: everyone sits quietly at a desk (not kept)
+static int g_focus_pomo;         // ...turned on by the pomodoro, which turns it off again
 static int g_stair_style = STAIRS_SLAB;
 
 // runtime
@@ -497,6 +499,7 @@ static void sample_input(void)
     g_world.mouse_mode = g_mouse_mode;
     g_world.cc = g_cc;
     g_world.climb = g_feat_climb;
+    g_world.focus = g_focus;
 }
 
 static ULONGLONG ft64(FILETIME f)
@@ -592,10 +595,20 @@ static HMONITOR pet_monitor(const Pet *p)
 
 /* ---- tray & timers ---------------------------------------------------- */
 
+// The pomodoro's focus time is over, or it was stopped: so is the focus
+// mode it turned on.
+static void pomo_focus_over(void)
+{
+    if (g_focus_pomo) g_focus = g_focus_pomo = 0;
+}
+
 static void pomo_status(wchar_t *buf, int n)
 {
     buf[0] = 0;
-    if (!g_pomo) return;
+    if (!g_pomo) {
+        if (g_focus) wcsncpy(buf, L"专注模式", n);
+        return;
+    }
     ULONGLONG now = GetTickCount64();
     int mins = now >= g_pomo_end ? 0 : (int)((g_pomo_end - now + 59999) / 60000);
     _snwprintf(buf, n, L"%ls · 还剩 %d 分钟", g_pomo == 1 ? L"专注中" : L"休息中", mins);
@@ -653,6 +666,7 @@ static void every_second(void)
             msg[63] = 0;
             g_pomo = 2;
             g_pomo_end = now + (ULONGLONG)g_pomo_break * 60000;
+            pomo_focus_over();
             announce(msg, 60000, 1);
         } else {
             g_pomo = 0;
@@ -790,6 +804,7 @@ static void pomo_start(int focus, int brk)
     reg_set_dword(L"PomoBreak", (DWORD)brk);
     g_pomo = 1;
     g_pomo_end = GetTickCount64() + (ULONGLONG)focus * 60000;
+    if (!g_focus) g_focus = g_focus_pomo = 1;
     _snwprintf(msg, 64, L"开始专注 %d 分钟！", focus);
     msg[63] = 0;
     announce(msg, 4000, 0);
@@ -846,9 +861,12 @@ static void show_menu(PetWin *pw)
     AppendMenuW(set, MF_SEPARATOR, 0, NULL);
     AppendMenuW(set, MF_STRING, IDM_UPDATE_CHECK, L"检查更新（当前 v" CLAWD_VERSION L"）");
 
+    // In focus mode they stay at their desks: no flips, games or climbing.
+    UINT busy = g_focus ? MF_GRAYED : 0;
+    AppendMenuW(m, MF_STRING | CHECK(g_focus), IDM_FOCUS, L"专注模式");
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
-    AppendMenuW(m, MF_STRING, IDM_FLIP, L"后空翻");
+    AppendMenuW(m, MF_STRING | busy, IDM_FLIP, L"后空翻");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
     HMENU play = CreatePopupMenu();
     AppendMenuW(play, MF_STRING, IDM_PLAY_GREET, L"打招呼聊天");
@@ -856,8 +874,8 @@ static void show_menu(PetWin *pw)
     AppendMenuW(play, MF_STRING, IDM_PLAY_LINE, L"排队走");
     AppendMenuW(play, MF_STRING, IDM_PLAY_RIDE, L"叠罗汉");
     AppendMenuW(play, MF_STRING, IDM_PLAY_DAZE, L"晕倒求安慰");
-    AppendMenuW(m, MF_POPUP | (active_pets() < 2 ? MF_GRAYED : 0), (UINT_PTR)play, L"一起玩");
-    if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
+    AppendMenuW(m, MF_POPUP | (active_pets() < 2 ? MF_GRAYED : busy), (UINT_PTR)play, L"一起玩");
+    if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? busy : MF_GRAYED), IDM_CLIMB, L"爬上去");
     AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
                 L"放置围墙");
     if (walls_count()) AppendMenuW(m, MF_STRING, IDM_WALL_CLEAR, L"拆掉所有围墙");
@@ -901,6 +919,10 @@ static void show_menu(PetWin *pw)
 
     ULONGLONG now = GetTickCount64();
     switch (cmd) {
+    case IDM_FOCUS:
+        g_focus = !g_focus;
+        g_focus_pomo = 0;   // the user's call now, whatever the pomodoro does
+        break;
     case IDM_PAUSE:
         // From a pet: just that one. From the tray: everyone.
         for (int i = 0; i < g_npets; i++)
@@ -981,10 +1003,12 @@ static void show_menu(PetWin *pw)
     }
     case IDM_POMO_STOP:
         g_pomo = 0;
+        pomo_focus_over();
         break;
     case IDM_FEAT_POMO:
         g_feat_pomo = !g_feat_pomo;
         g_pomo = 0;
+        pomo_focus_over();
         reg_set_dword(L"FeatPomo", (DWORD)g_feat_pomo);
         break;
     case IDM_FEAT_WATER:
@@ -1163,8 +1187,8 @@ static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static int write_sheet(const wchar_t *path)
 {
-    Pose poses[64];
-    int n = pet_demo_poses(poses, 64);
+    Pose poses[96];
+    int n = pet_demo_poses(poses, 96);
     // Glyphs after the poses, in as many cells as they need.
     int gcell[G_COUNT], gx[G_COUNT], gy[G_COUNT], gcells = 1;
     for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {

@@ -40,6 +40,11 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 #define FLIP_VY     12.0    // take-off speed (scale 4); with gravity 1 that is 24 ticks in the air
 #define FLIP_LIFT   6       // canvas rows the sprite is raised by when upside down, so the hat fits
 
+// Focus mode: a desk is DESK_W canvas columns wide, and desks in a row are
+// SEAT_GAP apart.
+#define DESK_W      24
+#define SEAT_GAP    28
+
 // The pet's solid box, in canvas columns: arm tip to arm tip. It runs from
 // the top of the head (SPR_OY) down to the feet (FOOT_Y).
 #define BOX_L (SPR_OX + 1)
@@ -203,14 +208,15 @@ static Bubble *new_bubble(Pet *p)
 static void say(Pet *p, int glyph, uint32_t color)
 {
     Bubble *b = new_bubble(p);
-    if (b) *b = (Bubble){ glyph, 45, 45, SPR_OX + 9 - glyph_width(glyph) / 2, SPR_OY - 8, 0, -0.08, color };
+    int y = SPR_OY - 8 + (p->desk ? DESK_DY : 0);
+    if (b) *b = (Bubble){ glyph, 45, 45, SPR_OX + 9 - glyph_width(glyph) / 2, y, 0, -0.08, color };
 }
 
 static void spawn_z(Pet *p)
 {
     Bubble *b = new_bubble(p);
     int g = (p->zcount++ % 2) ? G_ZBIG : G_Z;
-    if (b) *b = (Bubble){ g, 75, 75, SPR_OX + 13, SPR_OY - 3, 0.05, -0.11, C_WHITE };
+    if (b) *b = (Bubble){ g, 75, 75, SPR_OX + 13, SPR_OY - 3 + (p->desk ? DESK_DY : 0), 0.05, -0.11, C_WHITE };
 }
 
 static void spawn_drop(Pet *p)
@@ -531,6 +537,19 @@ static Pose pose_wave(int phase)
     return q;
 }
 
+// Sitting up at a desk (focus mode) with `prop` (PROP_DESK and on) in front
+// of it: holding the book up, or hands resting on the desk.
+static Pose pose_desk(int prop, int frame)
+{
+    Pose q = pose_stand();
+    q.body_dy = DESK_DY;
+    q.prop = prop;
+    q.prop_frame = frame;
+    for (int i = 0; i < 4; i++) q.legs[i] = 0;
+    q.arm_l = q.arm_r = prop == PROP_BOOK ? 1 : 2;
+    return q;
+}
+
 int pet_demo_poses(Pose *out, int max)
 {
     Pose all[] = {
@@ -542,9 +561,12 @@ int pet_demo_poses(Pose *out, int max)
         pose_shock(0), pose_shock(8), pose_shock(14), pose_startle(-1),
         pose_shiver(), pose_cry(0), pose_cry(5), pose_panic(0, 1), pose_panic(3, 1),
         pose_splat(1), pose_dazed(0),
+        pose_desk(PROP_BOOK, 0), pose_desk(PROP_BOOK, 1), pose_desk(PROP_HOMEWORK, 0),
+        pose_desk(PROP_HOMEWORK, 1), pose_desk(PROP_LAPTOP, 0), pose_desk(PROP_LAPTOP, 0),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
+    all[34].arm_r = 0;   // a key down
     int n = 0;
     for (int i = 0; i < (int)(sizeof all / sizeof all[0]) && n < max; i++) out[n++] = all[i];
 
@@ -552,6 +574,7 @@ int pet_demo_poses(Pose *out, int max)
     Pose more[] = {
         pose_walk(0, 1), pose_walk(2, -1), pose_type(1), pose_sleep(0), pose_wave(0),
         pose_dazed(0), pose_land(0), pose_stretch(), pose_startle(-1),
+        pose_desk(PROP_BOOK, 0), pose_desk(PROP_LAPTOP, 0),
     };
     static const unsigned char outfits[][SLOTS + 1] = {   // index into `more`, then the slots
         { 0, ACC_BEANIE, 0, 0, ACC_SCARF, ACC_COFFEE },
@@ -564,6 +587,8 @@ int pet_demo_poses(Pose *out, int max)
         { 6, ACC_CROWN, 0, ACC_HANDLEBAR, ACC_BOWTIE, ACC_COFFEE },
         { 7, ACC_PHONES, ACC_MONOCLE, 0, ACC_SCARF, ACC_CHIPS },
         { 8, ACC_BEANIE, ACC_GLASSES, ACC_PENCIL, ACC_BOWTIE, ACC_WATCH },
+        { 9, ACC_BOWLER, ACC_GLASSES, ACC_HANDLEBAR, ACC_SCARF, ACC_COFFEE },
+        { 10, ACC_PHONES, ACC_SHADES, ACC_GOATEE, ACC_BOWTIE, ACC_FRAPPE },
     };
     for (int a = 1; a < ACC_COUNT && n < max; a++) {
         out[n] = pose_stand();
@@ -621,7 +646,7 @@ void pet_set_scale(Pet *p, int scale)
 POINT pet_head(const Pet *p)
 {
     POINT h = { (LONG)(p->x + (SPR_OX + 9) * p->scale),
-                (LONG)(p->y + (SPR_OY - 2 - acc_above(p->wear)) * p->scale) };
+                (LONG)(p->y + (SPR_OY - 2 - acc_above(p->wear) + (p->desk ? DESK_DY : 0)) * p->scale) };
     return h;
 }
 
@@ -636,6 +661,7 @@ void pet_begin_drag(Pet *p, POINT grab)
     p->vx = p->vy = 0;
     p->forced_sleep = 0;
     p->following = 0;
+    if (p->seat) p->seat = SEAT_HERE;   // focus mode: wherever it is put down, it sits there
     set_state(p, ST_DRAG, 0);
     say(p, G_EXCL, C_EXCL);
 }
@@ -651,9 +677,27 @@ void pet_end_drag(Pet *p)
     set_state(p, ST_FALL, 0);
 }
 
+// Focus mode: sits down at its desk right where it is.
+static void sit_down(Pet *p)
+{
+    p->vx = p->vy = 0;
+    p->following = 0;
+    p->forced_sleep = 0;
+    if (!p->desk) p->desk_job = rr(p, 0, 1) ? PROP_BOOK : PROP_HOMEWORK;
+    p->desk = 1;
+    p->seat_x = mid_x(p);
+    p->count = 0;
+    set_state(p, ST_DESK, rr(p, 60, 300));   // dur: when the page turns, or the writing starts
+}
+
 void pet_click(Pet *p)
 {
     double u = unit(p);
+    if (p->desk && (p->state == ST_DESK || p->state == ST_SLEEP || p->state == ST_WAKE)) {
+        if (p->state != ST_DESK) sit_down(p);
+        p->count = 24;   // looks up, all smiles, and stays in its seat
+        return;
+    }
     if (p->state == ST_SLEEP || p->state == ST_WAKE) {
         p->forced_sleep = 0;
         say(p, G_EXCL, C_EXCL);
@@ -681,6 +725,10 @@ void pet_flip(Pet *p)
 
 void pet_cheer(Pet *p)
 {
+    if (p->state == ST_DESK) {   // pleased, quietly
+        p->count = 24;
+        return;
+    }
     if (!is_free(p->state) && p->state != ST_LAND && !is_social(p->state)) return;
     if (rr(p, 0, 2) == 0) {
         start_flip(p);
@@ -710,6 +758,8 @@ void pet_leave(Pet *p)
     p->forced_sleep = 0;
     p->following = 0;
     p->paused = 0;
+    p->desk = 0;
+    p->seat = SEAT_NONE;
     p->vx = p->vy = 0;
     p->leave_kind = rr(p, 0, LEAVE_KINDS - 1);
     switch (p->leave_kind) {
@@ -878,6 +928,15 @@ void pet_update(Pet *p, const World *w)
     stairs_update(p);
     double gy = ground_y(p);
 
+    if (!w->focus && (p->desk || p->seat)) {   // focus mode is over: up from the desk for a stretch
+        p->seat = SEAT_NONE;
+        if (p->desk && p->state == ST_DESK) {
+            set_state(p, ST_WAKE, 40);
+            p->t = 14;
+        }
+        p->desk = 0;
+    }
+
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
         p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP &&
@@ -901,7 +960,16 @@ void pet_update(Pet *p, const World *w)
 
     if (is_free(p->state)) {
         int want = -1;
-        if (p->typist && (w->cc == CLAUDE_WORKING || w->typing))
+        if (w->focus && p->perch && !p->paused) {   // down from up there first
+            p->perch = 0;
+            p->vx = p->dir * 2 * u;
+            p->vy = -9 * u;
+            p->following = 0;
+            set_state(p, ST_JUMP, 0);
+        } else if (w->focus)   // to its desk, once pets_together() has found it a seat
+            want = p->seat == SEAT_NONE ? -1
+                 : p->seat == SEAT_AT && fabs(p->seat_x - mid_x(p)) > 2 ? ST_TO_DESK : ST_DESK;
+        else if (p->typist && (w->cc == CLAUDE_WORKING || w->typing))
             want = ST_TYPE;
         else if (w->cc == CLAUDE_WAITING)
             want = ST_WAVE;
@@ -912,7 +980,9 @@ void pet_update(Pet *p, const World *w)
         else if (w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS)
             want = ST_SLEEP;
 
-        if (want >= 0 && p->state != want) {
+        if (want == ST_DESK) {
+            sit_down(p);
+        } else if (want >= 0 && p->state != want) {
             p->following = 0;
             p->forced_sleep = 0;
             set_state(p, want, 0);
@@ -1063,6 +1133,65 @@ void pet_update(Pet *p, const World *w)
         if (blinking) q.eyes = EYE_CLOSED;
         p->t++;
         break;
+
+    case ST_TO_DESK: {
+        double d = p->seat_x - mid_x(p), was = p->x;
+        if (!w->focus) {
+            set_state(p, ST_IDLE, rr(p, 30, 90));
+            break;
+        }
+        if (fabs(d) <= 2) {
+            sit_down(p);
+            q = pose_desk(p->desk_job, 0);
+            break;
+        }
+        p->dir = d > 0 ? 1 : -1;
+        move_x(p, p->dir * fmin(fabs(d), 3.4 * u));
+        clamp_walls(p, 0);
+        if (fabs(p->x - was) < 0.01 || ++p->t > 900) p->seat_x = mid_x(p);   // can't get there (a wall): sits here
+        q = pose_walk((p->t / 3) % 4, p->dir);
+        if (blinking) q.eyes = EYE_CLOSED;
+        break;
+    }
+
+    case ST_DESK: {
+        int since = p->t - p->dur;   // into what it does now and then
+        int dozing = w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS;
+        if (p->typist && (w->cc == CLAUDE_WORKING || w->typing)) {   // on the laptop, keys as in ST_TYPE
+            if (w->keys > 0 || (w->cc == CLAUDE_WORKING && !w->typing && rr(p, 0, 3) == 0)) {
+                p->tap_side = p->tap_side > 0 ? -1 : 1;
+                p->tap_t = 3;
+            }
+            q = pose_desk(PROP_LAPTOP, 0);
+            if (p->tap_t > 0) {
+                if (p->tap_side < 0) q.arm_l = 0;
+                else q.arm_r = 0;
+                p->tap_t--;
+            }
+            if (p->wear[SLOT_HEAD] == ACC_PHONES) q.squash = (p->t / 6) % 2;
+        } else if (p->desk_job == PROP_BOOK) {   // turning a page now and then
+            q = pose_desk(PROP_BOOK, since >= 0 && !dozing);
+            if (since >= 6) p->dur = p->t + rr(p, 240, 720);
+        } else {                                 // writing in spurts, the pencil going up and down
+            q = pose_desk(PROP_HOMEWORK, since >= 0 && !dozing && (since / 4) % 2);
+            if (since >= 60) p->dur = p->t + rr(p, 90, 300);
+        }
+        if (p->typist && w->cc == CLAUDE_WAITING) {   // hand up: Claude has a question
+            q.arm_r = -4;
+            if (p->t % 75 == 0) say(p, G_EXCL, C_EXCL);
+        }
+        if (p->count > 0) {
+            q.eyes = EYE_HAPPY;
+            p->count--;
+        } else if (dozing) {
+            q.eyes = EYE_CLOSED;
+            if (p->t % 90 == 0) spawn_z(p);
+        } else if (blinking) {
+            q.eyes = EYE_CLOSED;
+        }
+        p->t++;
+        break;
+    }
 
     case ST_WAVE:
         q = pose_wave((p->t / 6) % 2);
@@ -1481,6 +1610,12 @@ void pet_update(Pet *p, const World *w)
         break;
     }
     }
+    if (p->desk && p->state != ST_DESK) {   // carried about, thrown, ... with its desk: still sitting at it
+        Pose s = pose_desk(PROP_DESK, 0);
+        s.eyes = q.eyes;
+        s.look = q.look;
+        q = s;
+    }
     memcpy(q.wear, p->wear, sizeof q.wear);
     q.tick = (int)p->age++;
     p->pose = q;
@@ -1557,12 +1692,13 @@ static int side_by_side(const Pet *a, const Pet *b)
 
 // Free to start something with another pet.
 static int g_busy, g_hot;   // the user is typing / Claude Code is on; too hot to play (set each tick)
+static int g_focus;         // focus mode: nobody plays
 static int g_asked;         // pets_play(): never mind the wait between games, or how far apart they are
 
 // Keeps out of games for now: it's too hot, or it is the one at the keyboard.
 static int quiet(const Pet *p)
 {
-    return g_hot || (g_busy && p->typist);
+    return g_hot || g_focus || (g_busy && p->typist);
 }
 
 // Free to start something with another pet.
@@ -1808,12 +1944,83 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
     return ok;
 }
 
+/*
+ * Focus mode: a desk for everyone. On the floor the first pet is on they sit
+ * in a row beside it, a desk apart, like in a classroom; anyone elsewhere
+ * (on a wall, another screen) or told to stay put sits down where it is.
+ * Seats go to pets ready to sit: on their feet, and down from any perch.
+ */
+static int g_row;                     // the row is laid out
+static double g_row_x, g_row_floor;   // the first seat; screen y of the floor
+static RECT g_row_area;
+static int g_row_scale;
+
+static int in_row(const Pet *p)
+{
+    return p->scale == g_row_scale && p->area.left == g_row_area.left && p->area.bottom == g_row_area.bottom &&
+           fabs(ground_y(p) + FOOT_Y * p->scale - g_row_floor) < 2;
+}
+
+static int ready_to_sit(const Pet *p)
+{
+    return p->seat == SEAT_NONE && is_free(p->state) && (!p->perch || p->paused);
+}
+
+static void seat_pets(Pet **ps, int n)
+{
+    if (!g_row) {   // the first seat: where the first one ready is
+        Pet *a = NULL;
+        for (int i = 0; i < n && !a; i++)
+            if (ready_to_sit(ps[i])) a = ps[i];
+        if (!a) return;
+        g_row = 1;
+        g_row_x = mid_x(a);
+        g_row_floor = ground_y(a) + FOOT_Y * a->scale;
+        g_row_area = a->area;
+        g_row_scale = a->scale;
+    }
+    Pet *todo[16];   // nearest the first seat first, each to the free one nearest it, on its own side first
+    int m = 0;
+    for (int i = 0; i < n && m < 16; i++)
+        if (ready_to_sit(ps[i])) todo[m++] = ps[i];
+    for (int i = 1; i < m; i++)
+        for (int j = i; j > 0 && fabs(mid_x(todo[j]) - g_row_x) < fabs(mid_x(todo[j - 1]) - g_row_x); j--) {
+            Pet *t = todo[j];
+            todo[j] = todo[j - 1];
+            todo[j - 1] = t;
+        }
+    double gap = SEAT_GAP * g_row_scale;
+    for (int i = 0; i < m; i++) {
+        Pet *p = todo[i];
+        double lo = min_x(p) + (SPR_OX + 9) * p->scale, hi = max_x(p) + (SPR_OX + 9) * p->scale;
+        p->seat = SEAT_HERE;
+        p->seat_x = mid_x(p);
+        if (p->paused || !in_row(p)) continue;
+        int side = p->seat_x < g_row_x ? -1 : 1;
+        for (int d = 0; d < 64; d++) {   // 0, then one out on its side, one out on the other, two out, ...
+            double x = g_row_x + (d % 2 ? side : -side) * ((d + 1) / 2) * gap;
+            int taken = x < lo || x > hi;
+            for (int j = 0; j < n && !taken; j++)
+                taken = ps[j] != p && ps[j]->seat != SEAT_NONE && in_row(ps[j]) &&
+                        fabs(ps[j]->seat_x - x) < DESK_W * g_row_scale;   // the desks would overlap
+            if (!taken) {
+                p->seat = SEAT_AT;
+                p->seat_x = x;
+                break;
+            }
+        }
+    }
+}
+
 void pets_together(Pet **ps, int n, const World *w)
 {
     static ULONGLONG next_game;
     ULONGLONG now = plat_ticks_ms();
     g_busy = w->typing || w->cc != CLAUDE_IDLE;   // the one at the keyboard stays there
     g_hot = w->heat > 1;
+    g_focus = w->focus;
+    if (!g_focus) g_row = 0;
+    else if (n) seat_pets(ps, n);
 
     // Keep everything that was going on in step, or call it off.
     for (int i = 0; i < n; i++) {
@@ -2042,6 +2249,8 @@ void pets_together(Pet **ps, int n, const World *w)
                 break;
             }
         }
+
+        if (g_focus) continue;   // nobody gets up from their desk for the rest
 
         // Walking into another pet: say hello if both are free, else walk on through.
         int moving = a->state == ST_WALK || a->state == ST_FLEE || a->state == ST_GOTO ||

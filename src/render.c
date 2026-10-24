@@ -34,6 +34,52 @@ static void rect(Canvas *c, int x0, int y0, int x1, int y1, uint32_t col)
 
 static void draw_wear(Canvas *c, int ox, int oy, const Pose *p, int layer);
 
+/*
+ * A school desk standing on the floor in front of the sprite (light wooden
+ * top, green metal frame), and on it what the pet is busy with: a book held
+ * up with its cover to us, an exercise book and a pencil, or a laptop with
+ * its lid to us. The pet sits up behind it (DESK_DY), so its eyes show over
+ * the book.
+ */
+#define DESK_TOP   0xFFD9A86Cu
+#define DESK_EDGE  0xFFB07D45u
+#define DESK_FRAME 0xFF5E7F6Bu
+#define DESK_HOLE  0xFF3A2E26u
+#define PAPER      0xFFF4F1E8u
+
+static void draw_desk(Canvas *c, int ox, int oy, int prop, int frame)
+{
+    int ty = oy + 4, ground = oy + FOOT_Y - SPR_OY, x0 = ox - 3, x1 = ox + 20;
+    rect(c, x0, ty, x1, ty, DESK_TOP);
+    rect(c, x0, ty + 1, x1, ty + 1, DESK_EDGE);
+    rect(c, x0 + 2, ty + 2, x1 - 2, ty + 3, DESK_FRAME);   // the shelf under the top
+    rect(c, x0 + 3, ty + 2, x1 - 3, ty + 2, DESK_HOLE);
+    rect(c, x0 + 1, ty + 2, x0 + 1, ground - 1, DESK_FRAME);
+    rect(c, x1 - 1, ty + 2, x1 - 1, ground - 1, DESK_FRAME);
+
+    int bx = ox + 4, by = ty - 4;
+    switch (prop) {
+    case PROP_BOOK:
+        rect(c, bx, by, bx + 9, by + 2, 0xFF3D6FB0u);
+        rect(c, bx + 4, by, bx + 5, by + 2, 0xFF2A4F86u);   // spine
+        rect(c, bx + 1, by + 1, bx + 3, by + 1, 0xFFE8C860u);   // title
+        rect(c, bx + 6, by + 1, bx + 8, by + 1, 0xFFE8C860u);
+        rect(c, bx, by + 3, bx + 9, by + 3, PAPER);   // page edges
+        if (frame) rect(c, bx + 5, by - 1, bx + 7, by - 1, PAPER);   // a page turning over
+        break;
+    case PROP_HOMEWORK:   // the pencil is in the right hand, its tip on the paper (frame 0) or lifted
+        rect(c, ox + 4, ty - 1, ox + 14, ty - 1, PAPER);
+        rect(c, ox + 14, ty - 4 - frame, ox + 14, ty - 2 - frame, 0xFFE8B730u);
+        put(c, ox + 14, ty - 1 - frame, 0xFF333333u);
+        break;
+    case PROP_LAPTOP:
+        rect(c, bx, by, bx + 9, by + 2, 0xFFB8BCC2u);
+        rect(c, bx + 4, by + 1, bx + 5, by + 1, 0xFFE8ECF0u);   // logo
+        rect(c, bx - 1, ty - 1, bx + 10, ty - 1, 0xFF8C9096u);
+        break;
+    }
+}
+
 void cv_clear(Canvas *c)
 {
     memset(c->px, 0, sizeof(uint32_t) * c->w * c->h);
@@ -60,6 +106,7 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
         rect(c, ox, ky, ox + 17, ky + 1, COL_KB);
         for (int x = ox + 1; x <= ox + 16; x += 2) put(c, x, ky, COL_KEY);
     }
+    if (p->prop >= PROP_DESK) draw_desk(c, ox, oy, p->prop, p->prop_frame);
 
     int ay = oy + 4 + dy;
     rect(c, ox + 1 + sl, ay + p->arm_l, ox + 2 + sl, ay + p->arm_l + 1, COL_BODY);

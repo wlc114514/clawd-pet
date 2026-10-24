@@ -32,7 +32,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_OPEN, IDM_FEAT_UPDATE,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_OPEN, IDM_FEAT_UPDATE, IDM_FOCUS,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -55,6 +55,8 @@ static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscr
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
 static int g_feat_update = 1;   // look for a new version now and then
+static int g_focus;              // focus mode: everyone sits quietly at a desk (not kept)
+static int g_focus_pomo;         // ...turned on by the pomodoro, which turns it off again
 
 // runtime
 static int g_pomo;                 // 0 off, 1 focus, 2 break
@@ -78,6 +80,13 @@ static int ud_int(NSString *key, int def)
 static void ud_set(NSString *key, int v)
 {
     [[NSUserDefaults standardUserDefaults] setInteger:v forKey:key];
+}
+
+// The pomodoro's focus time is over, or it was stopped: so is the focus
+// mode it turned on.
+static void pomo_focus_over(void)
+{
+    if (g_focus_pomo) g_focus = g_focus_pomo = 0;
 }
 
 static int clampi(int v, int lo, int hi, int def)
@@ -331,6 +340,7 @@ static void sample_input(void)
     g_world.mouse_mode = g_mouse_mode;
     g_world.cc = g_cc;
     g_world.climb = g_feat_climb;
+    g_world.focus = g_focus;
 }
 
 static double sample_cpu(void)
@@ -444,8 +454,8 @@ static NSImage *status_icon(void)
 
 static int write_sheet(const char *path)
 {
-    Pose poses[64];
-    int n = pet_demo_poses(poses, 64);
+    Pose poses[96];
+    int n = pet_demo_poses(poses, 96);
     // Glyphs after the poses, in as many cells as they need.
     int gcell[G_COUNT], gx[G_COUNT], gy[G_COUNT], gcells = 1;
     for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
@@ -729,6 +739,7 @@ static int write_sheet(const char *path)
         if (g_pomo == 1) {
             g_pomo = 2;
             g_pomo_end = now + (ULONGLONG)g_pomo_break * 60000;
+            pomo_focus_over();
             [self announce:[NSString stringWithFormat:@"专注 %d 分钟完成！\n起来休息 %d 分钟吧",
                                                       g_pomo_focus, g_pomo_break]
                         ms:60000 cheer:YES];
@@ -776,7 +787,7 @@ static int write_sheet(const char *path)
 
 - (void)updateTooltip
 {
-    NSString *tip = @"Clawd";
+    NSString *tip = g_focus ? @"Clawd\n专注模式" : @"Clawd";
     if (g_pomo) {
         ULONGLONG now = plat_ticks_ms();
         int mins = now >= g_pomo_end ? 0 : (int)((g_pomo_end - now + 59999) / 60000);
@@ -880,9 +891,11 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     [set addItem:[NSMenuItem separatorItem]];
     add_item(set, @"检查更新（当前 v" CLAWD_VERSION "）", IDM_UPDATE_CHECK, NO, YES, self);
 
+    // In focus mode they stay at their desks: no flips, games or climbing.
+    add_item(m, @"专注模式", IDM_FOCUS, g_focus, YES, self);
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
-    add_item(m, @"后空翻", IDM_FLIP, NO, YES, self);
+    add_item(m, @"后空翻", IDM_FLIP, NO, !g_focus, self);
     add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
     NSMenu *play = [[NSMenu alloc] initWithTitle:@"一起玩"];
     add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, YES, self);
@@ -891,8 +904,8 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(play, @"叠罗汉", IDM_PLAY_RIDE, NO, YES, self);
     add_item(play, @"晕倒求安慰", IDM_PLAY_DAZE, NO, YES, self);
     add_submenu(m, @"一起玩", play);
-    m.itemArray.lastObject.enabled = [self activePets] >= 2;
-    if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb, self);
+    m.itemArray.lastObject.enabled = [self activePets] >= 2 && !g_focus;
+    if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb && !g_focus, self);
     add_item(m, @"放置围墙", IDM_WALL_DRAW, NO, walls_count() < MAX_WALLS && !walls_drawing(), self);
     if (walls_count()) add_item(m, @"拆掉所有围墙", IDM_WALL_CLEAR, NO, YES, self);
     if (g_feat_pomo || g_feat_water) [m addItem:[NSMenuItem separatorItem]];
@@ -952,6 +965,10 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     PetWindow *pw = _menuPet;
 
     switch (cmd) {
+    case IDM_FOCUS:
+        g_focus = !g_focus;
+        g_focus_pomo = 0;   // the user's call now, whatever the pomodoro does
+        break;
     case IDM_PAUSE: {
         // From a pet: just that one. From the tray: everyone.
         BOOL paused = pw ? pw.pet->paused : (g_pets.count && g_pets[0].pet->paused);
@@ -1034,6 +1051,7 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
             ud_set(@"PomoBreak", brk);
             g_pomo = 1;
             g_pomo_end = plat_ticks_ms() + (ULONGLONG)focus * 60000;
+            if (!g_focus) g_focus = g_focus_pomo = 1;
             [self announce:[NSString stringWithFormat:@"开始专注 %d 分钟！", focus] ms:4000 cheer:NO];
             [self updateTooltip];
         }];
@@ -1041,10 +1059,12 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     }
     case IDM_POMO_STOP:
         g_pomo = 0;
+        pomo_focus_over();
         break;
     case IDM_FEAT_POMO:
         g_feat_pomo = !g_feat_pomo;
         g_pomo = 0;
+        pomo_focus_over();
         ud_set(@"FeatPomo", g_feat_pomo);
         break;
     case IDM_FEAT_WATER:

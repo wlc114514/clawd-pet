@@ -12,6 +12,8 @@ enum {
     ST_CLIMB,  // hopping up a staircase that pops out of the taskbar
     ST_BUMP,   // walked into a wall: splat, stagger back, see stars
     ST_FLIP,   // backflip: crouch, then a full turn backwards in the air
+    ST_TO_DESK,// focus mode: walking over to its seat (Pet.seat_x)
+    ST_DESK,   // focus mode: sitting at a school desk, reading or writing (the typist: on a laptop)
     // Doing something with another pet (Pet.buddy); see pets_together().
     ST_GREET,  // face to face, waving
     ST_CHAT,   // taking turns to say something in pixel emoji
@@ -29,6 +31,7 @@ enum { PLAY_GREET, PLAY_CHASE, PLAY_LINE, PLAY_RIDE, PLAY_DAZE, PLAY_KINDS };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
+enum { SEAT_NONE, SEAT_AT, SEAT_HERE };   // Pet.seat: none yet; walk to seat_x; sit wherever it is
 
 // Everything outside the pet that it reacts to, sampled once per tick.
 typedef struct {
@@ -41,6 +44,7 @@ typedef struct {
     int cc;            // CC_*
     int climb;         // may climb stairs on its own
     int heat;          // 0 fine, 1 warm: sweats, 2 hot: sweats more and fans itself
+    int focus;         // focus mode: everyone sits quietly at a desk
 } World;
 
 typedef struct {
@@ -110,6 +114,10 @@ typedef struct {
     int carrying;           // id of the pet standing on its head, 0 = none
     ULONGLONG social_at;    // no new games before this
     unsigned char wear[SLOTS];  // ACC_* per slot, rolled at random in pet_init
+    int desk;               // has its desk out (focus mode), even while being carried about with it
+    int desk_job;           // what it does there: PROP_BOOK or PROP_HOMEWORK
+    int seat;               // SEAT_*, handed out by pets_together() in focus mode
+    double seat_x;          // where: screen x of the middle of the sprite
     unsigned age;           // ticks since pet_init
     int drag_dx, drag_dy;
     int zcount;

@@ -15,7 +15,10 @@
 #define COL_KEY  0xFFC8C8C8u
 
 enum { EYE_OPEN, EYE_CLOSED, EYE_HAPPY, EYE_WIDE, EYE_DIZZY };
-enum { PROP_NONE, PROP_KEYBOARD };
+// What it has in front of it. The rest are at a school desk (focus mode),
+// with the pet sitting up DESK_DY rows behind it.
+enum { PROP_NONE, PROP_KEYBOARD, PROP_DESK, PROP_BOOK, PROP_HOMEWORK, PROP_LAPTOP };
+#define DESK_DY -4
 enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_STAR,
        G_NOTE, G_SMILE, G_COFFEE, G_BULB, G_BOLT, G_COUNT };
 
@@ -41,6 +44,7 @@ typedef struct {
     int arm_l, arm_r; // vertical arm offset
     int legs[4];      // leg length below the body, 0..3
     int prop;         // PROP_*, drawn in front of the body, behind the arms
+    int prop_frame;   // its animation: a page turning, the pencil lifted
     int stretch_x;    // body pulled sideways by n px (+ right, - left); eyes stay put
     unsigned char wear[SLOTS];   // ACC_* in each slot
     int tick;         // clock for the accessories' own animation (steam)
