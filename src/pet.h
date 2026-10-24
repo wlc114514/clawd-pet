@@ -7,6 +7,7 @@ enum {
     ST_TYPE,   // sitting at a keyboard (user typing / Claude Code working)
     ST_WAVE,   // Claude Code needs the user
     ST_FLEE,   // running away from the cursor
+    ST_LEAVE,  // being sent away: startled, then drops through the taskbar
 };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
@@ -36,10 +37,12 @@ typedef struct {
     int dir, look, look_t, blink_t;
     int scale;
     int paused, forced_sleep, following;
+    int gone;              // finished leaving; the window can be destroyed
     int tap_t, tap_side;
     int drag_dx, drag_dy;
     int zcount;
     RECT area;             // work area of the monitor the pet is on
+    RECT screen;           // the whole monitor
     Bubble bub[MAX_BUBBLES];
     unsigned rng;
     Pose pose;
@@ -54,6 +57,7 @@ void pet_end_drag(Pet *p);
 void pet_click(Pet *p);
 void pet_cheer(Pet *p);
 void pet_sleep(Pet *p);
+void pet_leave(Pet *p);
 POINT pet_head(const Pet *p);   // screen point just above the head
 
 Pose pose_stand(void);

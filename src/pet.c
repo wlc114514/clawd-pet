@@ -2,6 +2,7 @@
 #include <math.h>
 
 #define SLEEP_AFTER_MS (5 * 60 * 1000)
+#define LEAVE_SHOCK_TICKS 24
 
 #define C_HEART 0xFF5A78u
 #define C_EXCL  0xFFD23Fu
@@ -40,8 +41,10 @@ static void refresh_area(Pet *p)
 {
     POINT feet = { (LONG)p->x + CW * p->scale / 2, (LONG)p->y + FOOT_Y * p->scale - 1 };
     MONITORINFO mi = { sizeof mi };
-    if (GetMonitorInfoW(MonitorFromPoint(feet, MONITOR_DEFAULTTONEAREST), &mi))
+    if (GetMonitorInfoW(MonitorFromPoint(feet, MONITOR_DEFAULTTONEAREST), &mi)) {
         p->area = mi.rcWork;
+        p->screen = mi.rcMonitor;
+    }
 }
 
 static void set_state(Pet *p, int st, int dur)
@@ -181,6 +184,18 @@ static Pose pose_type(int tap)
     return q;
 }
 
+// Startled: a jolt upward, then arms up and shaking, eyes darting about.
+static Pose pose_shock(int t)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_WIDE;
+    q.squash = t < 4 ? -1 : 0;
+    q.arm_l = (t / 2) % 2 ? -3 : -2;
+    q.arm_r = (t / 2) % 2 ? -2 : -3;
+    q.look = t < 6 ? 0 : ((t / 4) % 2 ? 1 : -1);
+    return q;
+}
+
 static Pose pose_wave(int phase)
 {
     Pose q = pose_stand();
@@ -197,6 +212,7 @@ int pet_demo_poses(Pose *out, int max)
         pose_dangle(0), pose_air(1), pose_hop(1), pose_land(0),
         pose_sleep(0), pose_sleep(1), pose_stretch(),
         pose_type(0), pose_type(-1), pose_type(1), pose_wave(0), pose_wave(1),
+        pose_shock(0), pose_shock(8), pose_shock(14),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
@@ -238,6 +254,7 @@ POINT pet_head(const Pet *p)
 
 void pet_begin_drag(Pet *p, POINT grab)
 {
+    if (p->state == ST_LEAVE) return;   // no rescuing it mid-fall
     p->drag_dx = grab.x - (int)p->x;
     p->drag_dy = grab.y - (int)p->y;
     p->vx = p->vy = 0;
@@ -249,6 +266,7 @@ void pet_begin_drag(Pet *p, POINT grab)
 
 void pet_end_drag(Pet *p)
 {
+    if (p->state != ST_DRAG) return;
     double lim = 30 * unit(p);
     if (p->vx > lim) p->vx = lim;
     if (p->vx < -lim) p->vx = -lim;
@@ -287,9 +305,20 @@ void pet_cheer(Pet *p)
 
 void pet_sleep(Pet *p)
 {
-    if (p->state == ST_DRAG) return;
+    if (p->state == ST_DRAG || p->state == ST_LEAVE) return;
     p->forced_sleep = 1;
     set_state(p, ST_SLEEP, 0);
+}
+
+void pet_leave(Pet *p)
+{
+    p->forced_sleep = 0;
+    p->following = 0;
+    p->paused = 0;
+    p->vx = 0;
+    p->vy = -5 * unit(p);
+    say(p, G_EXCL, C_EXCL);
+    set_state(p, ST_LEAVE, 0);
 }
 
 void pet_update(Pet *p, const World *w)
@@ -299,7 +328,7 @@ void pet_update(Pet *p, const World *w)
     double gy = ground_y(p);
 
     // Grounded states stick to the floor; if the floor moved away, fall.
-    if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP) {
+    if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP && p->state != ST_LEAVE) {
         if (p->y < gy - 0.5) {
             p->vx = p->vy = 0;
             set_state(p, ST_FALL, 0);
@@ -510,6 +539,25 @@ void pet_update(Pet *p, const World *w)
             q = pose_stretch();
         }
         if (++p->t >= p->dur) set_state(p, ST_IDLE, 60);
+        break;
+
+    case ST_LEAVE:
+        p->vy += 1.0 * u;
+        p->y += p->vy;
+        if (p->t < LEAVE_SHOCK_TICKS) {
+            // Startled on the spot (pet_leave gave it a little jolt)...
+            if (p->y >= gy) {
+                p->y = gy;
+                p->vy = 0;
+            }
+            if (p->t == 10) say(p, G_QUEST, C_WHITE);
+            q = pose_shock(p->t);
+        } else {
+            // ...then the taskbar gives way and down it goes.
+            q = pose_dangle((p->t / 3) % 2);
+            if (p->y > p->screen.bottom) p->gone = 1;
+        }
+        p->t++;
         break;
     }
     p->pose = q;

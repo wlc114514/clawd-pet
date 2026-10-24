@@ -215,16 +215,37 @@ static PetWin *spawn_pet(int drop_in)
     return pw;
 }
 
-static void despawn_pet(void)
+// Pets that are not on their way out.
+static int active_pets(void)
 {
-    if (g_npets <= 1) return;
-    PetWin *pw = g_pets[--g_npets];
+    int n = 0;
+    for (int i = 0; i < g_npets; i++) n += g_pets[i]->pet.state != ST_LEAVE;
+    return n;
+}
+
+// Send the newest pet away; it is destroyed once it has fallen off screen.
+// g_pets[0] (the talker) always stays.
+static void send_away_pet(void)
+{
+    if (active_pets() <= 1) return;
+    for (int i = g_npets - 1; i > 0; i--)
+        if (g_pets[i]->pet.state != ST_LEAVE) {
+            pet_leave(&g_pets[i]->pet);
+            return;
+        }
+}
+
+static void destroy_pet(int idx)
+{
+    PetWin *pw = g_pets[idx];
     if (g_press_pw == pw) g_press_pw = NULL;
     tb_destroy(&pw->tb);
     DestroyWindow(pw->hwnd);
     DeleteDC(pw->memdc);
     if (pw->dib) DeleteObject(pw->dib);
     free(pw);
+    memmove(&g_pets[idx], &g_pets[idx + 1], sizeof g_pets[0] * (size_t)(g_npets - idx - 1));
+    g_npets--;
 }
 
 // The first Clawd does the talking; everyone cheers.
@@ -414,7 +435,10 @@ static void tick(void)
             ShowWindow(pw->hwnd, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
             if (hide) tb_suspend(&pw->tb);
         }
-        if (hide) continue;
+        if (hide) {
+            if (pw->pet.state == ST_LEAVE) pw->pet.gone = 1;   // nobody to see the fall
+            continue;
+        }
         pet_update(&pw->pet, &g_world);
         present(pw);
         tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
@@ -424,6 +448,8 @@ static void tick(void)
                 SetWindowPos(pw->tb.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
+    for (int i = g_npets - 1; i >= 0; i--)
+        if (g_pets[i]->pet.gone) destroy_pet(i);
 }
 
 static void on_cc_event(int ev)
@@ -500,7 +526,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_POPUP, (UINT_PTR)water, L"喝水提醒");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
-    AppendMenuW(m, MF_STRING | (g_npets <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
+    AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"大小");
     AppendMenuW(m, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
     AppendMenuW(m, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
@@ -553,11 +579,11 @@ static void show_menu(PetWin *pw)
         break;
     case IDM_ADD_PET:
         spawn_pet(1);
-        reg_set_dword(L"Count", (DWORD)g_npets);
+        reg_set_dword(L"Count", (DWORD)active_pets());
         break;
     case IDM_REMOVE_PET:
-        despawn_pet();
-        reg_set_dword(L"Count", (DWORD)g_npets);
+        send_away_pet();
+        reg_set_dword(L"Count", (DWORD)active_pets());
         break;
     case IDM_SIZE_S:
     case IDM_SIZE_M:
