@@ -22,6 +22,13 @@ Claude Code 吉祥物 Clawd 的 Windows / macOS 桌宠。Windows 版是纯 C + W
 - 托盘图标 + 右键菜单（常用动作在顶层，各种设置收在「设置」子菜单里），设置保存在 `HKCU\Software\ClawdPet`，可开机自启
 - **联动 Claude Code**：Claude 干活时它敲键盘，等你批准权限时它挥手，回复完了它跳起来说「搞定啦！」
 
+## 下载
+
+在 [Releases](https://github.com/wlc114514/clawd-pet/releases/latest) 里：
+
+- **Windows**：下载 `clawd.exe` 直接运行
+- **macOS**（11 以上，M 系列和 Intel 都行）：下载 `Clawd-mac.zip`，解压后把 `Clawd.app` 拖进「应用程序」。app 没有苹果开发者签名，第一次打开会被拦：右键 ▸ 打开；较新的 macOS 上要去「系统设置 ▸ 隐私与安全性」点「仍要打开」
+
 ## 编译
 
 ### Windows
