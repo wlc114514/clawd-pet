@@ -30,6 +30,7 @@ enum {
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
+    IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -845,6 +846,14 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
     add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
+    NSMenu *play = [[NSMenu alloc] initWithTitle:@"一起玩"];
+    add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, YES, self);
+    add_item(play, @"追着玩", IDM_PLAY_CHASE, NO, YES, self);
+    add_item(play, @"排队走", IDM_PLAY_LINE, NO, YES, self);
+    add_item(play, @"叠罗汉", IDM_PLAY_RIDE, NO, YES, self);
+    add_item(play, @"晕倒求安慰", IDM_PLAY_DAZE, NO, YES, self);
+    add_submenu(m, @"一起玩", play);
+    m.itemArray.lastObject.enabled = [self activePets] >= 2;
     if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb, self);
     add_item(m, @"放置围墙", IDM_WALL_DRAW, NO, walls_count() < MAX_WALLS && !walls_drawing(), self);
     if (walls_count()) add_item(m, @"拆掉所有围墙", IDM_WALL_CLEAR, NO, YES, self);
@@ -947,6 +956,19 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
         g_typing_on = !g_typing_on;
         ud_set(@"Typing", g_typing_on);
         break;
+    case IDM_PLAY_GREET:
+    case IDM_PLAY_CHASE:
+    case IDM_PLAY_LINE:
+    case IDM_PLAY_RIDE:
+    case IDM_PLAY_DAZE: {   // from a pet: that one starts it
+        Pet *all[MAX_PETS];
+        int n = 0;
+        for (PetWindow *p in g_pets)
+            if (!p.hiddenByFullscreen && p.pet->state != ST_LEAVE && n < MAX_PETS) all[n++] = p.pet;
+        if (!pets_play(all, n, pw ? pw.pet : NULL, cmd - IDM_PLAY_GREET))
+            [self announce:@"它们现在都忙着呢，待会儿再试试～" ms:3000 cheer:NO];
+        break;
+    }
     case IDM_WARDROBE: {   // from the menu bar: the first one
         if (!g_pets.count) break;
         const Pet *p = pw ? pw.pet : g_pets[0].pet;

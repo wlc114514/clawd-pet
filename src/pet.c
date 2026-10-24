@@ -1482,10 +1482,26 @@ static int side_by_side(const Pet *a, const Pet *b)
 }
 
 // Free to start something with another pet.
+static int g_busy, g_hot;   // the user is typing / Claude Code is on; too hot to play (set each tick)
+static int g_asked;         // pets_play(): never mind the wait between games, or how far apart they are
+
+// Keeps out of games for now: it's too hot, or it is the one at the keyboard.
+static int quiet(const Pet *p)
+{
+    return g_hot || (g_busy && p->typist);
+}
+
+// Free to start something with another pet.
 static int sociable(const Pet *p, ULONGLONG now)
 {
     return (p->state == ST_IDLE || p->state == ST_WALK) && !p->paused && !p->following &&
-           !p->buddy && !p->carrying && now >= p->social_at;
+           !p->buddy && !p->carrying && !quiet(p) && (g_asked || now >= p->social_at);
+}
+
+// Close enough to play with, `px` at scale 4.
+static int within(const Pet *a, const Pet *b, double px)
+{
+    return g_asked || fabs(mid_x(a) - mid_x(b)) < px * unit(a);
 }
 
 // Doing something together right now, so they may overlap.
@@ -1580,7 +1596,7 @@ static int start_chase(Pet **ps, int n, Pet *a, ULONGLONG now)
 {
     for (int i = 0; i < n; i++) {
         Pet *b = ps[i];
-        if (b == a || !sociable(b, now) || !side_by_side(a, b) || fabs(mid_x(a) - mid_x(b)) > 900 * unit(a)) continue;
+        if (b == a || !sociable(b, now) || !side_by_side(a, b) || !within(a, b, 900)) continue;
         Pet *two[2] = { a, b };
         for (int j = 0; j < 2; j++) {
             two[j]->buddy = two[!j]->id;
@@ -1602,8 +1618,7 @@ static int start_line(Pet **ps, int n, Pet *a, ULONGLONG now)
     Pet *line[8];
     int m = 0;
     for (int i = 0; i < n && m < 8; i++)
-        if (ps[i] != a && sociable(ps[i], now) && side_by_side(a, ps[i]) &&
-            fabs(mid_x(ps[i]) - mid_x(a)) < 1200 * unit(a))
+        if (ps[i] != a && sociable(ps[i], now) && side_by_side(a, ps[i]) && within(a, ps[i], 1200))
             line[m++] = ps[i];
     if (!m) return 0;
     for (int i = 1; i < m; i++)   // nearest first
@@ -1634,7 +1649,7 @@ static int start_ride(Pet **ps, int n, Pet *a, ULONGLONG now)
 {
     for (int i = 0; i < n; i++) {
         Pet *b = ps[i];
-        if (b == a || !sociable(b, now) || !side_by_side(a, b) || fabs(mid_x(a) - mid_x(b)) > 600 * unit(a)) continue;
+        if (b == a || !sociable(b, now) || !side_by_side(a, b) || !within(a, b, 600)) continue;
         Pet top = *a;   // room up there?
         top.x = b->x;
         top.y = b->y - (FOOT_Y - SPR_OY) * b->scale;
@@ -1652,11 +1667,79 @@ static int start_ride(Pet **ps, int n, Pet *a, ULONGLONG now)
     return 0;
 }
 
+// A walks over to b to say hello.
+static int start_greet(Pet **ps, int n, Pet *a, ULONGLONG now)
+{
+    for (int i = 0; i < n; i++) {
+        Pet *b = ps[i];
+        if (b == a || !sociable(b, now) || !side_by_side(a, b)) continue;
+        a->buddy = b->id;
+        a->role = GO_GREET;
+        a->following = 0;
+        set_state(a, ST_GOTO, 0);
+        b->following = 0;
+        b->social_at = now + SOCIAL_MS;   // nobody else's game meanwhile
+        set_state(b, ST_IDLE, 900);       // wait for it (as long as a GOTO may take)
+        return 1;
+    }
+    return 0;
+}
+
+int pets_play(Pet **ps, int n, Pet *who, int what)
+{
+    ULONGLONG now = plat_ticks_ms();
+    Pet *by[16];
+    int ok = 0;
+    if (n > 16) n = 16;
+    g_asked = 1;
+    for (int i = 0; i < n && !ok; i++) {
+        Pet *a = who ? who : ps[i];
+        if (sociable(a, now)) {
+            if (what == PLAY_DAZE) {   // keels over; the nearest free one, however far, comes to pat it
+                start_bump(a, 0, BUMP_LAND);
+                Pet *best = NULL;
+                for (int j = 0; j < n; j++) {
+                    Pet *c = ps[j];
+                    if (c != a && sociable(c, now) && side_by_side(a, c) &&
+                        (!best || fabs(mid_x(c) - mid_x(a)) < fabs(mid_x(best) - mid_x(a))))
+                        best = c;
+                }
+                if (best) {
+                    best->buddy = a->id;
+                    best->role = GO_COMFORT;
+                    best->following = 0;
+                    set_state(best, ST_GOTO, 0);
+                    a->buddy = best->id;
+                }
+                ok = 1;
+                break;
+            }
+            int m = 0;   // the others, nearest first
+            for (int j = 0; j < n; j++)
+                if (ps[j] != a) by[m++] = ps[j];
+            for (int j = 1; j < m; j++)
+                for (int k = j; k > 0 && fabs(mid_x(by[k]) - mid_x(a)) < fabs(mid_x(by[k - 1]) - mid_x(a)); k--) {
+                    Pet *t = by[k];
+                    by[k] = by[k - 1];
+                    by[k - 1] = t;
+                }
+            ok = what == PLAY_GREET ? start_greet(by, m, a, now)
+               : what == PLAY_CHASE ? start_chase(by, m, a, now)
+               : what == PLAY_LINE  ? start_line(by, m, a, now)
+                                    : start_ride(by, m, a, now);
+        }
+        if (who) break;
+    }
+    g_asked = 0;
+    return ok;
+}
+
 void pets_together(Pet **ps, int n, const World *w)
 {
     static ULONGLONG next_game;
     ULONGLONG now = plat_ticks_ms();
-    int quiet = w->typing || w->cc != CLAUDE_IDLE || w->heat > 1;   // the user is busy
+    g_busy = w->typing || w->cc != CLAUDE_IDLE;   // the one at the keyboard stays there
+    g_hot = w->heat > 1;
 
     // Keep everything that was going on in step, or call it off.
     for (int i = 0; i < n; i++) {
@@ -1676,13 +1759,14 @@ void pets_together(Pet **ps, int n, const World *w)
             ok = b && (b->state == ST_WALK || b->state == ST_FOLLOW) && side_by_side(p, b);
             break;
         case ST_GOTO:
-            ok = b && p->t < 300 &&
+            ok = b && p->t < 900 &&
                  (p->role == GO_RIDE    ? b->carrying == p->id && can_carry(b) && side_by_side(p, b)
+                : p->role == GO_GREET   ? can_carry(b) && side_by_side(p, b) && !quiet(b)
                 : p->role == GO_COMFORT ? b->state == ST_BUMP && b->buddy == p->id
                                         : b->state == ST_SLEEP);
             break;
         case ST_RIDE:
-            if (!b || b->carrying != p->id || !can_carry(b) || quiet) {
+            if (!b || b->carrying != p->id || !can_carry(b) || quiet(p) || quiet(b)) {
                 knock_off(p, b && b->carrying == p->id ? b : NULL);
                 continue;
             }
@@ -1710,7 +1794,7 @@ void pets_together(Pet **ps, int n, const World *w)
             p->buddy = 0;
             continue;
         }
-        if (quiet) {
+        if (quiet(p) || (b && quiet(b))) {
             drop_out(p, now);
         } else if (!ok) {
             say(p, G_QUEST, C_WHITE);
@@ -1791,6 +1875,10 @@ void pets_together(Pet **ps, int n, const World *w)
                 set_state(p, ST_RIDE, 0);
             } else if (p->role == GO_COMFORT) {
                 set_state(p, ST_COMFORT, 0);
+            } else if (p->role == GO_GREET) {   // asked for (pets_play): they always get to chat
+                p->buddy = 0;
+                greet(p, b);
+                if (!p->count) p->count = b->count = rr(p, 3, 6);
             } else {
                 p->forced_sleep = 1;
                 set_state(p, ST_SLEEP, 0);
@@ -1854,7 +1942,7 @@ void pets_together(Pet **ps, int n, const World *w)
         }
     }
 
-    if (quiet || n < 2) return;
+    if (g_hot || n < 2) return;
 
     for (int i = 0; i < n; i++) {
         Pet *a = ps[i];

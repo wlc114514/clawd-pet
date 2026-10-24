@@ -33,6 +33,7 @@ enum {
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
+    IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -832,6 +833,13 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
+    HMENU play = CreatePopupMenu();
+    AppendMenuW(play, MF_STRING, IDM_PLAY_GREET, L"打招呼聊天");
+    AppendMenuW(play, MF_STRING, IDM_PLAY_CHASE, L"追着玩");
+    AppendMenuW(play, MF_STRING, IDM_PLAY_LINE, L"排队走");
+    AppendMenuW(play, MF_STRING, IDM_PLAY_RIDE, L"叠罗汉");
+    AppendMenuW(play, MF_STRING, IDM_PLAY_DAZE, L"晕倒求安慰");
+    AppendMenuW(m, MF_POPUP | (active_pets() < 2 ? MF_GRAYED : 0), (UINT_PTR)play, L"一起玩");
     if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
     AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
                 L"放置围墙");
@@ -910,6 +918,19 @@ static void show_menu(PetWin *pw)
         g_typing_on = !g_typing_on;
         reg_set_dword(L"Typing", (DWORD)g_typing_on);
         break;
+    case IDM_PLAY_GREET:
+    case IDM_PLAY_CHASE:
+    case IDM_PLAY_LINE:
+    case IDM_PLAY_RIDE:
+    case IDM_PLAY_DAZE: {   // from a pet: that one starts it
+        Pet *all[MAX_PETS];
+        int n = 0;
+        for (int i = 0; i < g_npets; i++)
+            if (!g_pets[i]->hidden && g_pets[i]->pet.state != ST_LEAVE) all[n++] = &g_pets[i]->pet;
+        if (!pets_play(all, n, pw ? &pw->pet : NULL, cmd - IDM_PLAY_GREET))
+            announce(L"它们现在都忙着呢，待会儿再试试～", 3000, 0);
+        break;
+    }
     case IDM_WARDROBE: {   // from the tray: the first one
         const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
         wardrobe_open(pet_head(p), p->area, g_dpi, p->id, p->wear, dressed);

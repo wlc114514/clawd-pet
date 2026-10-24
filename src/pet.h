@@ -22,7 +22,9 @@ enum {
     ST_YAWN,   // a sleeping buddy is catching
     ST_GOODBYE,// waving a buddy off as it leaves
 };
-enum { GO_RIDE, GO_COMFORT, GO_SLEEP };
+enum { GO_RIDE, GO_COMFORT, GO_SLEEP, GO_GREET };
+// Games that can be asked for (pets_play).
+enum { PLAY_GREET, PLAY_CHASE, PLAY_LINE, PLAY_RIDE, PLAY_DAZE, PLAY_KINDS };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
@@ -140,6 +142,9 @@ POINT pet_head(const Pet *p);   // screen point just above the head
 // Everything between pets: meeting, games, comforting, ... Call once a tick
 // after pet_update() for each of them, with the pets that are on screen.
 void pets_together(Pet **pets, int n, const World *w);
+// Starts PLAY_* right now (the menu), with `who` leading (NULL: whoever is
+// free) and the nearest free pet joining in. 0 if nobody could.
+int  pets_play(Pet **pets, int n, Pet *who, int what);
 
 Pose pose_stand(void);
 int  pet_demo_poses(Pose *out, int max);
