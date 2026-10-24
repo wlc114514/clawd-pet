@@ -16,7 +16,8 @@
 
 enum { EYE_OPEN, EYE_CLOSED, EYE_HAPPY, EYE_WIDE, EYE_DIZZY };
 enum { PROP_NONE, PROP_KEYBOARD };
-enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_STAR, G_COUNT };
+enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_STAR,
+       G_NOTE, G_SMILE, G_COFFEE, G_BULB, G_BOLT, G_COUNT };
 
 #define FAN_W 7    // desk fan prop, drawn standing on the floor beside the pet
 #define FAN_H 10
@@ -42,5 +43,8 @@ void draw_fan(Canvas *c, int x, int y, int frame);
 void draw_wall(Canvas *c);
 int  glyph_width(int g);
 void draw_glyph(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha);
+// The same inside a white speech bubble with its tail at the bottom middle.
+void draw_speech(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha);
+int  glyph_height(int g);
 // Nearest-neighbour upscale by k into dst (c->w*k by c->h*k), premultiplied ARGB.
 void cv_scale_premul(const Canvas *c, uint32_t *dst, int k);

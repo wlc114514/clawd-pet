@@ -11,7 +11,18 @@ enum {
     ST_STARTLE,// cartoon leap backwards, freezing at the top
     ST_CLIMB,  // hopping up a staircase that pops out of the taskbar
     ST_BUMP,   // walked into a wall: splat, stagger back, see stars
+    // Doing something with another pet (Pet.buddy); see pets_together().
+    ST_GREET,  // face to face, waving
+    ST_CHAT,   // taking turns to say something in pixel emoji
+    ST_CHASE,  // tag: chasing (role 1) or running away (role 0)
+    ST_FOLLOW, // walking in a line behind its buddy
+    ST_GOTO,   // walking over to its buddy, to do `role` (GO_*) when there
+    ST_RIDE,   // standing on its buddy's head (role 0: hopping up)
+    ST_COMFORT,// patting a dazed buddy
+    ST_YAWN,   // a sleeping buddy is catching
+    ST_GOODBYE,// waving a buddy off as it leaves
 };
+enum { GO_RIDE, GO_COMFORT, GO_SLEEP };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
@@ -34,6 +45,7 @@ typedef struct {
     double x, y, vx, vy;   // canvas coordinates
     uint32_t color;
     double ay;             // gravity
+    int framed;            // in a white speech bubble
 } Bubble;
 
 #define MAX_BUBBLES 16
@@ -86,6 +98,12 @@ typedef struct {
     double hop_x, hop_y;    // where the current hop started
     double perch;           // floor height above the taskbar, px (0 = on the taskbar)
     ULONGLONG perch_until;  // when to jump back down
+    int id;                 // unique, so pets can refer to each other
+    int buddy;              // id of the pet it is doing something with, 0 = none
+    int role, lead, count;  // what the shared activity needs (see the states)
+    double goal_x;          // where it is heading: screen x of the middle of the sprite
+    int carrying;           // id of the pet standing on its head, 0 = none
+    ULONGLONG social_at;    // no new games before this
     int drag_dx, drag_dy;
     int zcount;
     RECT area;             // work area of the monitor the pet is on
@@ -115,6 +133,9 @@ int  pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin);
 // The walls every pet collides with, as rectangles in screen pixels.
 void pet_set_walls(const RECT *walls, int n);
 POINT pet_head(const Pet *p);   // screen point just above the head
+// Everything between pets: meeting, games, comforting, ... Call once a tick
+// after pet_update() for each of them, with the pets that are on screen.
+void pets_together(Pet **pets, int n, const World *w);
 
 Pose pose_stand(void);
 int  pet_demo_poses(Pose *out, int max);

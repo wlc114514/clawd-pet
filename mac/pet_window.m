@@ -114,6 +114,11 @@ PetWindow *pet_window_pressed(void)
 - (Pet *)pet { return &_pet; }
 - (TextBubble *)bubble { return _bubble; }
 
+- (BOOL)hiddenByFullscreen
+{
+    return _hidden;
+}
+
 - (void)setHiddenByFullscreen:(BOOL)hidden
 {
     if (hidden == _hidden) return;

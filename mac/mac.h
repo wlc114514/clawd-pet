@@ -68,6 +68,7 @@ PetWindow *pet_window_pressed(void);              // the pet being dragged, or n
 - (void)presentStairs;
 - (void)invalidate;                              // force a redraw and re-place
 - (void)setHiddenByFullscreen:(BOOL)hidden;
+- (BOOL)hiddenByFullscreen;
 @end
 
 /* ---- walls ------------------------------------------------------------- */

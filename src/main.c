@@ -670,6 +670,9 @@ static void tick(void)
     }
     if (n % 60 == 0) walls_raise();   // the pets go back on top of them just below
 
+    // Move everyone, sort out what they do together, then draw.
+    Pet *live[MAX_PETS];
+    int nlive = 0;
     for (int i = 0; i < g_npets; i++) {
         PetWin *pw = g_pets[i];
         int hide = g_fs_mon && pet_monitor(&pw->pet) == g_fs_mon && g_press_pw != pw;
@@ -687,6 +690,12 @@ static void tick(void)
             continue;
         }
         pet_update(&pw->pet, &g_world);
+        live[nlive++] = &pw->pet;
+    }
+    pets_together(live, nlive, &g_world);
+    for (int i = 0; i < g_npets; i++) {
+        PetWin *pw = g_pets[i];
+        if (pw->hidden) continue;
         present(pw);
         present_stairs(pw);
         tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
@@ -1032,7 +1041,24 @@ static int write_sheet(const wchar_t *path)
 {
     Pose poses[32];
     int n = pet_demo_poses(poses, 32);
-    int k = 6, cw = CW * k, ch = CH * k, cols = n + 1, W = cw * cols, H = ch * 2;
+    // Glyphs after the poses, in as many cells as they need.
+    int gcell[G_COUNT], gx[G_COUNT], gy[G_COUNT], gcells = 1;
+    for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
+        if (x + glyph_width(g) > CW - 1) {
+            x = 2;
+            y += 11;
+        }
+        if (y + glyph_height(g) > CH - 1) {
+            x = 2;
+            y = 3;
+            gcells++;
+        }
+        gcell[g] = gcells - 1;
+        gx[g] = x;
+        gy[g] = y;
+        x += glyph_width(g) + 3;
+    }
+    int k = 6, cw = CW * k, ch = CH * k, cols = n + gcells, W = cw * cols, H = ch * 2;
     uint32_t *img = calloc((size_t)W * H, 4), *cell = malloc((size_t)cw * ch * 4);
     uint32_t lp[CW * CH];
     Canvas c = { lp, CW, CH };
@@ -1045,16 +1071,10 @@ static int write_sheet(const wchar_t *path)
             static const uint32_t col[G_COUNT] = {
                 [G_Z] = 0xFFFFFF, [G_ZBIG] = 0xFFFFFF, [G_EXCL] = 0xFFD23F, [G_QUEST] = 0xFFFFFF,
                 [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF, [G_WIND] = 0xCFE8FF,
-                [G_STAR] = 0xFFD23F,
+                [G_STAR] = 0xFFD23F, [G_NOTE] = 0x9B7BFF, [G_COFFEE] = 0xB8B8B8, [G_BOLT] = 0xF2A007,
             };
-            for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
-                if (x + glyph_width(g) > CW - 1) {
-                    x = 2;
-                    y += 11;
-                }
-                draw_glyph(&c, x, y, g, col[g], 255);
-                x += glyph_width(g) + 3;
-            }
+            for (int g = 0; g < G_COUNT; g++)
+                if (gcell[g] == i - n) draw_glyph(&c, gx[g], gy[g], g, col[g], 255);
         }
         cv_scale_premul(&c, cell, k);
         for (int row = 0; row < 2; row++) {

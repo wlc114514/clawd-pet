@@ -28,6 +28,13 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 #define BUMP_DAZE 15
 #define BUMP_END  52
 
+// Pets together.
+#define GREET_TICKS 30
+#define CHAT_TURN   40      // ticks per thing said
+#define SOCIAL_MS   45000   // between one game and the next, per pet
+#define RIDE_HOP    10
+#define C_NOTE      0x9B7BFFu
+
 // The pet's solid box, in canvas columns: arm tip to arm tip. It runs from
 // the top of the head (SPR_OY) down to the feet (FOOT_Y).
 #define BOX_L (SPR_OX + 1)
@@ -50,6 +57,8 @@ static int rr(Pet *p, int lo, int hi)
 
 // Physics constants are tuned for scale 4 and scaled from there.
 static double unit(const Pet *p) { return p->scale / 4.0; }
+static double mid_x(const Pet *p) { return p->x + (SPR_OX + 9) * p->scale; }
+static double feet_y(const Pet *p) { return p->y + FOOT_Y * p->scale; }
 /* ---- walls ------------------------------------------------------------ */
 
 static RECT g_walls[MAX_WALLS];
@@ -160,6 +169,11 @@ static int is_free(int st)
     return st == ST_IDLE || st == ST_WALK || st == ST_TYPE || st == ST_WAVE || st == ST_FLEE;
 }
 
+static int is_social(int st)
+{
+    return st >= ST_GREET;
+}
+
 static void clamp_walls(Pet *p, double bounce)
 {
     if (p->x < min_x(p)) { p->x = min_x(p); p->vx = -p->vx * bounce; }
@@ -214,11 +228,22 @@ static void spawn_bonk(Pet *p, int side)
 // Stars circling its head while it is dazed.
 static void spawn_orbit(Pet *p)
 {
+    p->count++;
     for (int i = 0; i < 2; i++) {
-        double a = p->t * 0.35 + i * 3.14159265;
+        double a = p->count * 0.35 + i * 3.14159265;
         Bubble *b = new_bubble(p);
         if (b) *b = (Bubble){ G_STAR, 2, 2, SPR_OX + 8 + 7 * cos(a), SPR_OY - 5 + 2 * sin(a), 0, 0, C_EXCL };
     }
+}
+
+// Something said in pixel emoji, in a speech bubble over its head.
+static void spawn_chat(Pet *p)
+{
+    static const int pick[] = { G_HEART, G_NOTE, G_SMILE, G_COFFEE, G_BULB, G_BOLT, G_QUEST, G_EXCL };
+    static const uint32_t col[] = { C_HEART, C_NOTE, 0, 0xB8B8B8u, 0, 0xF2A007u, 0x3A3A3Au, 0xE0533Au };
+    int i = rr(p, 0, 7), g = pick[i], w = glyph_width(g), h = glyph_height(g);
+    Bubble *b = new_bubble(p);
+    if (b) *b = (Bubble){ g, 34, 34, SPR_OX + 9 - w / 2, SPR_OY - 4 - h, 0, 0, col[i], 0, 1 };
 }
 
 static void spawn_sob(Pet *p, int life)
@@ -515,7 +540,9 @@ int pet_demo_poses(Pose *out, int max)
 
 void pet_init(Pet *p, int scale, unsigned seed)
 {
+    static int next_id;
     memset(p, 0, sizeof *p);
+    p->id = ++next_id;
     p->rng = seed | 1;
     p->scale = scale;
     plat_work_area(&p->area, &p->screen);
@@ -581,7 +608,7 @@ void pet_click(Pet *p)
         p->vx = 0;
         p->vy = -10 * u;
         set_state(p, ST_FALL, 0);
-    } else if (is_free(p->state) || p->state == ST_LAND) {
+    } else if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) {
         if (rr(p, 0, 4)) say(p, G_HEART, C_HEART);
         else say(p, G_QUEST, C_WHITE);
         p->vx = 0;
@@ -593,7 +620,7 @@ void pet_click(Pet *p)
 
 void pet_cheer(Pet *p)
 {
-    if (!is_free(p->state) && p->state != ST_LAND) return;
+    if (!is_free(p->state) && p->state != ST_LAND && !is_social(p->state)) return;
     say(p, G_HEART, C_HEART);
     p->vx = 0;
     p->vy = -11 * unit(p);
@@ -638,7 +665,7 @@ void pet_leave(Pet *p)
 void pet_startle(Pet *p, double from_x)
 {
     int s = p->state;
-    if (!is_free(s) && s != ST_LAND && s != ST_SLEEP && s != ST_WAKE) return;
+    if (!is_free(s) && s != ST_LAND && s != ST_SLEEP && s != ST_WAKE && !is_social(s)) return;
     int dir = p->x >= from_x ? 1 : -1;   // leap away from it...
     double u = unit(p);
     p->forced_sleep = 0;
@@ -653,7 +680,7 @@ void pet_startle(Pet *p, double from_x)
 int pet_can_climb(const Pet *p)
 {
     int s = p->state;
-    return !p->stairs.n && !p->paused &&
+    return !p->stairs.n && !p->paused && !p->carrying &&
            (s == ST_IDLE || s == ST_WALK || s == ST_TYPE || s == ST_WAVE || s == ST_LAND) &&
            (stairs_room(p, 1) >= 3 || stairs_room(p, -1) >= 3);
 }
@@ -769,6 +796,8 @@ static void start_bump(Pet *p, int side, int t)
     p->following = 0;
     p->forced_sleep = 0;
     p->bump_side = side;
+    p->buddy = 0;   // free for someone to come and comfort it
+    p->count = 0;
     if (side) p->dir = side;
     p->hop_x = p->x;
     p->hop_y = p->y;
@@ -786,7 +815,8 @@ void pet_update(Pet *p, const World *w)
 
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
-        p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP) {
+        p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP &&
+        p->state != ST_RIDE) {
         if (p->y < gy - 0.5) {   // walked off the end of a wall: keep going a little
             p->vx = p->state == ST_WALK || p->state == ST_FLEE ? p->dir * 1.5 * u : 0;
             p->vy = 0;
@@ -885,7 +915,7 @@ void pet_update(Pet *p, const World *w)
                 if (walled(p, p->dir, 40 * p->scale) && rr(p, 0, 2)) p->dir = -p->dir;   // mostly
                 p->following = 0;
                 set_state(p, ST_WALK, rr(p, 60, 240));
-            } else if (r < walk_pct + 8) {
+            } else if (r < walk_pct + 8 && !p->carrying) {
                 p->vx = 0;
                 p->vy = -7 * u;
                 set_state(p, ST_JUMP, 0);
@@ -1133,8 +1163,8 @@ void pet_update(Pet *p, const World *w)
                 q = pose_land(1);
                 q.eyes = EYE_DIZZY;
             } else if (p->t < BUMP_END - 10) {
-                q = pose_dazed(p->t);
-                int sway = (p->t / 4) % 4;
+                q = pose_dazed(p->count);
+                int sway = (p->count / 4) % 4;
                 p->shake = sway == 1 ? 1 : sway == 3 ? -1 : 0;
                 spawn_orbit(p);
             } else {                      // shake it off
@@ -1143,6 +1173,7 @@ void pet_update(Pet *p, const World *w)
                 q.look = (p->t / 2) % 2 ? 1 : -1;
             }
         }
+        if (p->buddy && p->t >= BUMP_END - 11) p->t = BUMP_END - 12;   // being comforted: stay put
         if (++p->t >= BUMP_END) {         // and off it goes, the other way
             p->dir = side ? -side : (rr(p, 0, 1) ? 1 : -1);
             if (p->paused || w->heat > 1) set_state(p, ST_IDLE, rr(p, 40, 120));
@@ -1150,6 +1181,139 @@ void pet_update(Pet *p, const World *w)
         }
         break;
     }
+
+    case ST_GREET:
+    case ST_GOODBYE:
+        q = pose_wave((p->t / (p->state == ST_GREET ? 5 : 7)) % 2);
+        if (p->dir < 0) {   // wave with the arm on its side
+            q.arm_l = q.arm_r;
+            q.arm_r = 0;
+        }
+        q.look = p->dir;
+        if (p->state == ST_GOODBYE && p->t > 20) {
+            q.eyes = EYE_CLOSED;
+            if (p->t % 6 == 0) spawn_tears(p, &q);
+        }
+        p->t++;
+        break;
+
+    case ST_CHAT: {
+        int turn = p->t / CHAT_TURN, at = p->t % CHAT_TURN, mine = (turn % 2 == 0) == (p->lead != 0);
+        q.look = p->dir;
+        if (mine) {
+            if (at == 3) spawn_chat(p);
+            if (at >= 3 && at < 27) {   // talking with its hands
+                int up = (at / 4) % 2 ? -2 : 0;
+                if (p->dir > 0) q.arm_r = up;
+                else q.arm_l = up;
+            }
+        } else if (at == 14) {          // how it takes it
+            p->role = rr(p, 0, 3);
+            if (p->role == 2) {
+                static const int g[3] = { G_EXCL, G_QUEST, G_HEART };
+                static const uint32_t c[3] = { C_EXCL, C_WHITE, C_HEART };
+                int i = rr(p, 0, 2);
+                say(p, g[i], c[i]);
+            }
+        } else if (at > 14 && at < 30) {
+            if (p->role == 0) q.body_dy = (at / 3) % 2;   // nodding
+            if (p->role == 1) q.eyes = EYE_HAPPY;
+        }
+        if (blinking && q.eyes == EYE_OPEN) q.eyes = EYE_CLOSED;
+        p->t++;
+        break;
+    }
+
+    case ST_CHASE: {
+        double d = p->goal_x - mid_x(p);
+        if (p->dur > 0) {                // just tagged: "it" counts before giving chase
+            p->dur--;
+            q.eyes = EYE_HAPPY;
+            q.arm_l = q.arm_r = (p->dur / 4) % 2 ? -3 : -1;
+            q.look = d > 0 ? 1 : -1;
+        } else {
+            p->dir = (d > 0) == (p->role != 0) ? 1 : -1;
+            move_x(p, p->dir * (p->role ? 3.4 : 3.0) * u);
+            clamp_walls(p, 0);
+            if (p->role) {
+                q = pose_walk((p->t / 2) % 4, p->dir);
+                q.eyes = EYE_HAPPY;
+            } else {
+                q = pose_panic(p->t, p->dir);
+            }
+        }
+        p->t++;
+        break;
+    }
+
+    case ST_FOLLOW: {
+        double d = p->goal_x - mid_x(p), step = d * 0.25, lim = 6 * u;
+        if (step > lim) step = lim;
+        if (step < -lim) step = -lim;
+        if (fabs(d) < 1) step = d;
+        move_x(p, step);
+        clamp_walls(p, 0);
+        if (fabs(step) > 0.4 * u) {
+            p->dir = step > 0 ? 1 : -1;
+            q = pose_walk((p->t / 3) % 4, p->dir);
+        } else {
+            q.look = p->role;            // the way the line faces
+        }
+        if (blinking) q.eyes = EYE_CLOSED;
+        p->t++;
+        break;
+    }
+
+    case ST_GOTO: {
+        double d = p->goal_x - mid_x(p);
+        p->lead = fabs(d) <= 2;          // there
+        if (!p->lead) {
+            p->dir = d > 0 ? 1 : -1;
+            int hit = move_x(p, p->dir * fmin(fabs(d), 2.6 * u));
+            if (hit) {
+                spawn_bonk(p, hit);
+                start_bump(p, hit, 0);
+                q = pose_splat(hit);
+                break;
+            }
+            clamp_walls(p, 0);
+            q = pose_walk((p->t / 3) % 4, p->dir);
+        }
+        if (blinking) q.eyes = EYE_CLOSED;
+        p->t++;
+        break;
+    }
+
+    case ST_RIDE:   // pets_together() moves it about
+        if (p->role == 0) {
+            q = pose_hop(p->t < RIDE_HOP / 2);
+        } else {
+            q.look = p->dir;
+            q.eyes = blinking ? EYE_CLOSED : EYE_HAPPY;
+            if ((p->t / 30) % 4 == 3) q.arm_l = q.arm_r = (p->t / 4) % 2 ? -3 : -2;   // look how tall I am
+        }
+        p->t++;
+        break;
+
+    case ST_COMFORT: {
+        int pat = (p->t / 5) % 2 ? -2 : 0;
+        q.eyes = EYE_HAPPY;
+        q.look = p->dir;
+        if (p->dir > 0) q.arm_r = pat;
+        else q.arm_l = pat;
+        p->t++;
+        break;
+    }
+
+    case ST_YAWN:
+        if (p->t < 14) {
+            q = pose_stretch();
+            if (p->t == 4) spawn_z(p);
+        } else {
+            q.eyes = p->t < 24 ? EYE_CLOSED : EYE_OPEN;
+        }
+        p->t++;
+        break;
 
     case ST_SLEEP:
         q = pose_sleep((p->t / 40) % 2);
@@ -1254,6 +1418,511 @@ void pet_render(const Pet *p, Canvas *c)
         if (b->life <= 0) continue;
         int fade = b->max < 30 ? b->max / 3 : 15;
         int alpha = b->life < fade ? b->life * 255 / fade : 255;
-        draw_glyph(c, (int)floor(b->x), (int)floor(b->y), b->glyph, b->color, alpha);
+        if (b->framed) draw_speech(c, (int)floor(b->x), (int)floor(b->y), b->glyph, b->color, alpha);
+        else draw_glyph(c, (int)floor(b->x), (int)floor(b->y), b->glyph, b->color, alpha);
+    }
+}
+
+/* ---- together --------------------------------------------------------- */
+
+static Pet *pet_by_id(Pet **ps, int n, int id)
+{
+    for (int i = 0; id && i < n; i++)
+        if (ps[i]->id == id) return ps[i];
+    return NULL;
+}
+
+// On the same floor of the same screen.
+static int side_by_side(const Pet *a, const Pet *b)
+{
+    return fabs(feet_y(a) - feet_y(b)) < 2 && a->scale == b->scale &&
+           a->area.left == b->area.left && a->area.bottom == b->area.bottom;
+}
+
+// Free to start something with another pet.
+static int sociable(const Pet *p, ULONGLONG now)
+{
+    return (p->state == ST_IDLE || p->state == ST_WALK) && !p->paused && !p->following &&
+           !p->buddy && !p->carrying && now >= p->social_at;
+}
+
+// Doing something together right now, so they may overlap.
+static int linked(const Pet *a, const Pet *b)
+{
+    int line_a = a->state == ST_FOLLOW || a->state == ST_WALK, line_b = b->state == ST_FOLLOW || b->state == ST_WALK;
+    return a->buddy == b->id || b->buddy == a->id || a->carrying == b->id || b->carrying == a->id ||
+           (line_a && line_b && (a->state == ST_FOLLOW || b->state == ST_FOLLOW));   // in the same line
+}
+
+// Steady enough to have someone standing on its head.
+static int can_carry(const Pet *p)
+{
+    return p->state == ST_IDLE || p->state == ST_WALK;
+}
+
+static int in_wall(const Pet *p)
+{
+    double k = p->scale, l = p->x + BOX_L * k, r = p->x + BOX_R * k, t = p->y + SPR_OY * k, b = feet_y(p);
+    for (int i = 0; i < g_nwalls; i++) {
+        const RECT *w = &g_walls[i];
+        if (l < w->right - 0.5 && r > w->left + 0.5 && t < w->bottom - 0.5 && b > w->top + 0.5) return 1;
+    }
+    return 0;
+}
+
+static void drop_out(Pet *p, ULONGLONG now)
+{
+    p->buddy = 0;
+    p->social_at = now + SOCIAL_MS;
+    set_state(p, ST_IDLE, rr(p, 30, 90));
+}
+
+// Done together: each walks off its own way.
+static void part(Pet *a, Pet *b, ULONGLONG now)
+{
+    Pet *two[2] = { a, b };
+    for (int i = 0; i < 2; i++) {
+        Pet *p = two[i];
+        p->buddy = 0;
+        p->social_at = now + SOCIAL_MS;
+        p->dir = mid_x(p) < mid_x(two[!i]) ? -1 : 1;
+        set_state(p, ST_WALK, rr(p, 30, 80));
+    }
+}
+
+// Whoever is standing on its head comes down.
+static void knock_off(Pet *r, Pet *carrier)
+{
+    if (carrier) carrier->carrying = 0;
+    r->buddy = 0;
+    r->vx = (rr(r, 0, 1) ? 2 : -2) * unit(r);
+    r->vy = -3 * unit(r);
+    say(r, G_EXCL, C_EXCL);
+    set_state(r, ST_FALL, 0);
+}
+
+// Screen y for the feet of a pet standing on c's head (which bobs as it walks).
+static double ride_y(const Pet *c)
+{
+    const Pose *q = &c->pose;
+    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0);
+    return c->y + top * c->scale - FOOT_Y * c->scale;
+}
+
+static void greet(Pet *a, Pet *b)
+{
+    double k = a->scale, gap = 3 * k;
+    Pet *l = mid_x(a) < mid_x(b) ? a : b, *r = l == a ? b : a;
+    double short_by = gap - ((r->x + BOX_L * k) - (l->x + BOX_R * k));
+    if (short_by > 0) {   // a step apart, face to face
+        move_x(l, -short_by / 2);
+        move_x(r, short_by / 2);
+    }
+    int turns = rr(a, 0, 9) < 4 ? 0 : rr(a, 3, 6);
+    Pet *two[2] = { a, b };
+    for (int i = 0; i < 2; i++) {
+        Pet *p = two[i];
+        p->buddy = two[!i]->id;
+        p->lead = i == 0;
+        p->count = turns;
+        p->following = 0;
+        p->vx = 0;
+        p->dir = p == l ? 1 : -1;
+        set_state(p, ST_GREET, 0);
+    }
+    say(a, G_HEART, C_HEART);
+    say(b, rr(b, 0, 1) ? G_EXCL : G_HEART, rr(b, 0, 1) ? C_EXCL : C_HEART);
+}
+
+// Bumped into another pet: a little hop back, and off the other way.
+static void bounce_off(Pet *p, double gap)
+{
+    if (gap < 0) p->x += p->dir * gap;
+    p->dir = -p->dir;
+    p->following = 0;
+    p->vx = p->dir * 2 * unit(p);
+    p->vy = -5 * unit(p);
+    set_state(p, ST_JUMP, 0);
+}
+
+static int start_chase(Pet **ps, int n, Pet *a, ULONGLONG now)
+{
+    for (int i = 0; i < n; i++) {
+        Pet *b = ps[i];
+        if (b == a || !sociable(b, now) || !side_by_side(a, b) || fabs(mid_x(a) - mid_x(b)) > 900 * unit(a)) continue;
+        Pet *two[2] = { a, b };
+        for (int j = 0; j < 2; j++) {
+            two[j]->buddy = two[!j]->id;
+            two[j]->role = j == 0;      // a is "it"
+            two[j]->following = 0;
+            set_state(two[j], ST_CHASE, j == 0 ? 15 : 0);
+        }
+        a->count = rr(a, 2, 4);         // tags before they have had enough
+        say(a, G_EXCL, C_EXCL);
+        say(b, G_EXCL, C_EXCL);
+        return 1;
+    }
+    return 0;
+}
+
+// A walks off humming, everyone else nearby falls in behind.
+static int start_line(Pet **ps, int n, Pet *a, ULONGLONG now)
+{
+    Pet *line[8];
+    int m = 0;
+    for (int i = 0; i < n && m < 8; i++)
+        if (ps[i] != a && sociable(ps[i], now) && side_by_side(a, ps[i]) &&
+            fabs(mid_x(ps[i]) - mid_x(a)) < 1200 * unit(a))
+            line[m++] = ps[i];
+    if (!m) return 0;
+    for (int i = 1; i < m; i++)   // nearest first
+        for (int j = i; j > 0 && fabs(mid_x(line[j]) - mid_x(a)) < fabs(mid_x(line[j - 1]) - mid_x(a)); j--) {
+            Pet *t = line[j];
+            line[j] = line[j - 1];
+            line[j - 1] = t;
+        }
+    double pos = (mid_x(a) - a->area.left) / (double)(a->area.right - a->area.left);
+    a->dir = pos < 0.5 ? 1 : -1;      // the side with more room
+    a->following = 0;
+    a->social_at = now + SOCIAL_MS;
+    set_state(a, ST_WALK, rr(a, 250, 450));
+    say(a, G_NOTE, C_NOTE);
+    for (int i = 0; i < m; i++) {
+        Pet *p = line[i];
+        p->buddy = (i ? line[i - 1] : a)->id;
+        p->role = a->dir;
+        p->following = 0;
+        p->social_at = now + SOCIAL_MS;
+        set_state(p, ST_FOLLOW, 0);
+    }
+    return 1;
+}
+
+// A goes over to b and climbs onto its head.
+static int start_ride(Pet **ps, int n, Pet *a, ULONGLONG now)
+{
+    for (int i = 0; i < n; i++) {
+        Pet *b = ps[i];
+        if (b == a || !sociable(b, now) || !side_by_side(a, b) || fabs(mid_x(a) - mid_x(b)) > 600 * unit(a)) continue;
+        Pet top = *a;   // room up there?
+        top.x = b->x;
+        top.y = b->y - (FOOT_Y - SPR_OY) * b->scale;
+        if (top.y + (SPR_OY - 12) * top.scale < b->area.top || in_wall(&top)) continue;
+        a->buddy = b->id;
+        a->role = GO_RIDE;
+        a->following = 0;
+        a->social_at = b->social_at = now + SOCIAL_MS;
+        set_state(a, ST_GOTO, 0);
+        b->carrying = a->id;
+        b->following = 0;
+        set_state(b, ST_IDLE, 60);   // wait for it
+        return 1;
+    }
+    return 0;
+}
+
+void pets_together(Pet **ps, int n, const World *w)
+{
+    static ULONGLONG next_game;
+    ULONGLONG now = plat_ticks_ms();
+    int quiet = w->typing || w->cc != CLAUDE_IDLE || w->heat > 1;   // the user is busy
+
+    // Keep everything that was going on in step, or call it off.
+    for (int i = 0; i < n; i++) {
+        Pet *p = ps[i], *b = pet_by_id(ps, n, p->buddy);
+        int ok = 1;
+        if (p->carrying) {
+            Pet *r = pet_by_id(ps, n, p->carrying);
+            if (!r || r->buddy != p->id || (r->state != ST_RIDE && r->state != ST_GOTO)) p->carrying = 0;
+        }
+        switch (p->state) {
+        case ST_GREET:
+        case ST_CHAT:
+        case ST_CHASE:
+            ok = b && b->state == p->state && b->buddy == p->id;
+            break;
+        case ST_FOLLOW:
+            ok = b && (b->state == ST_WALK || b->state == ST_FOLLOW) && side_by_side(p, b);
+            break;
+        case ST_GOTO:
+            ok = b && p->t < 300 &&
+                 (p->role == GO_RIDE    ? b->carrying == p->id && can_carry(b) && side_by_side(p, b)
+                : p->role == GO_COMFORT ? b->state == ST_BUMP && b->buddy == p->id
+                                        : b->state == ST_SLEEP);
+            break;
+        case ST_RIDE:
+            if (!b || b->carrying != p->id || !can_carry(b) || quiet) {
+                knock_off(p, b && b->carrying == p->id ? b : NULL);
+                continue;
+            }
+            break;
+        case ST_COMFORT:
+            ok = b && b->state == ST_BUMP && b->buddy == p->id;
+            break;
+        case ST_YAWN:
+            break;
+        case ST_GOODBYE:
+            ok = b && b->state == ST_LEAVE;
+            break;
+        case ST_SLEEP:   // dozed off next to b: wakes up with it
+            if (p->buddy && !(b && b->state == ST_SLEEP)) {
+                p->buddy = 0;
+                p->forced_sleep = 0;
+                set_state(p, ST_WAKE, 40);
+            }
+            continue;
+        case ST_BUMP:    // b is coming to comfort it
+            if (p->buddy && !(b && (b->state == ST_GOTO || b->state == ST_COMFORT) && b->buddy == p->id))
+                p->buddy = 0;
+            continue;
+        default:
+            p->buddy = 0;
+            continue;
+        }
+        if (quiet) {
+            drop_out(p, now);
+        } else if (!ok) {
+            say(p, G_QUEST, C_WHITE);
+            drop_out(p, now);
+        }
+    }
+
+    // Carry on with it.
+    for (int i = 0; i < n; i++) {
+        Pet *p = ps[i], *b = pet_by_id(ps, n, p->buddy);
+        if (!b || !is_social(p->state)) continue;
+        double k = p->scale, u = unit(p);
+        int side = mid_x(p) < mid_x(b) ? -1 : 1;   // which side of b it is on
+        switch (p->state) {
+        case ST_GREET:
+            if (p->lead && p->t >= GREET_TICKS) {
+                if (p->count) {
+                    set_state(p, ST_CHAT, 0);
+                    set_state(b, ST_CHAT, 0);
+                } else {
+                    part(p, b, now);
+                }
+            }
+            break;
+
+        case ST_CHAT:
+            if (p->lead && p->t >= p->count * CHAT_TURN) {
+                if (rr(p, 0, 1)) {
+                    say(p, G_HEART, C_HEART);
+                    say(b, G_HEART, C_HEART);
+                }
+                part(p, b, now);
+            }
+            break;
+
+        case ST_CHASE:
+            p->goal_x = mid_x(b);
+            if (p->t > 900) {            // can't get at each other (a wall?): never mind
+                part(p, b, now);
+                break;
+            }
+            if (p->role && !p->dur && fabs(mid_x(p) - mid_x(b)) < 13 * k) {   // tag!
+                say(p, G_EXCL, C_EXCL);
+                if (--p->count <= 0) {   // that's enough: a happy hop each
+                    Pet *two[2] = { p, b };
+                    for (int j = 0; j < 2; j++) {
+                        two[j]->buddy = 0;
+                        two[j]->social_at = now + SOCIAL_MS;
+                        two[j]->vx = 0;
+                        two[j]->vy = -9 * u;
+                        say(two[j], G_HEART, C_HEART);
+                        set_state(two[j], ST_JUMP, 0);
+                    }
+                } else {
+                    b->count = p->count;
+                    p->role = 0;
+                    b->role = 1;
+                    b->dur = 20;
+                }
+            }
+            break;
+
+        case ST_FOLLOW:
+            p->goal_x = mid_x(b) - b->dir * 22 * k;
+            p->role = b->dir;
+            if (b->state == ST_WALK && b->t % 40 == 20) say(b, G_NOTE, C_NOTE);   // the leader hums along
+            break;
+
+        case ST_GOTO:
+            p->goal_x = mid_x(b) + side * (p->role == GO_RIDE ? 16 : 20) * k;
+            if (!p->lead) break;
+            p->dir = -side;
+            p->t = 0;
+            if (p->role == GO_RIDE) {
+                p->role = 0;
+                p->hop_x = p->x;
+                p->hop_y = p->y;
+                set_state(p, ST_RIDE, 0);
+            } else if (p->role == GO_COMFORT) {
+                set_state(p, ST_COMFORT, 0);
+            } else {
+                p->forced_sleep = 1;
+                set_state(p, ST_SLEEP, 0);
+            }
+            break;
+
+        case ST_RIDE: {
+            double tx = b->x, ty = ride_y(b);
+            if (p->role == 0) {          // hopping up
+                double f = (double)p->t / RIDE_HOP;
+                if (f > 1) f = 1;
+                p->x = p->hop_x + (tx - p->hop_x) * f;
+                p->y = p->hop_y + (ty - p->hop_y) * f - 24 * k * f * (1 - f);
+                if (p->t >= RIDE_HOP) {
+                    p->role = 1;
+                    p->count = rr(p, 150, 400);
+                    p->t = 0;
+                    say(p, G_HEART, C_HEART);
+                }
+                break;
+            }
+            p->x = tx;
+            p->y = ty;
+            p->dir = b->dir;
+            if (in_wall(p)) {            // scraped off by a wall
+                spawn_bonk(p, 0);
+                knock_off(p, b);
+                p->bonked = 2;
+            } else if (p->t >= p->count) {   // had enough: jump down
+                b->carrying = 0;
+                p->buddy = 0;
+                p->vx = (rr(p, 0, 1) ? 3 : -3) * u;
+                p->vy = -7 * u;
+                set_state(p, ST_JUMP, 0);
+            }
+            break;
+        }
+
+        case ST_COMFORT:
+            p->dir = -side;
+            if (p->t % 25 == 10) say(b, G_HEART, C_HEART);
+            if (p->t >= 60) {            // there, there
+                b->buddy = 0;
+                drop_out(p, now);
+            }
+            break;
+
+        case ST_YAWN:
+            if (p->t < 30) break;
+            if (p->role && b->state == ST_SLEEP) {   // and goes to lie down next to it
+                p->role = GO_SLEEP;
+                set_state(p, ST_GOTO, 0);
+            } else {
+                drop_out(p, now);
+            }
+            break;
+
+        case ST_GOODBYE:
+            p->dir = -side;
+            break;
+        }
+    }
+
+    if (quiet || n < 2) return;
+
+    for (int i = 0; i < n; i++) {
+        Pet *a = ps[i];
+        double k = a->scale, u = unit(a);
+
+        // Thrown at another pet: knocks it silly.
+        if (a->state == ST_FALL && a->thrown && hypot(a->vx, a->vy) > 8 * u) {
+            for (int j = 0; j < n; j++) {
+                Pet *b = ps[j];
+                if (b == a || b->state == ST_DRAG || b->state == ST_LEAVE || b->state == ST_BUMP || b->state == ST_RIDE ||
+                    b->state == ST_CLIMB)
+                    continue;
+                double ox = fmin(a->x + (SPR_OX + 15) * k, b->x + (SPR_OX + 15) * k) -
+                            fmax(a->x + (SPR_OX + 3) * k, b->x + (SPR_OX + 3) * k);
+                double oy = fmin(feet_y(a), feet_y(b)) - fmax(a->y + SPR_OY * k, b->y + SPR_OY * k);
+                if (ox <= 0 || oy <= 0) continue;
+                int side = mid_x(a) > mid_x(b) ? 1 : -1;   // where it came from, seen from b
+                spawn_bonk(b, side);
+                start_bump(b, side, 0);
+                a->vx = -a->vx * 0.4;
+                if (a->vy > -4 * u) a->vy = -4 * u;
+                say(a, G_EXCL, C_EXCL);
+                break;
+            }
+        }
+
+        // Walking into another pet: say hello, or bounce off it.
+        int moving = a->state == ST_WALK || a->state == ST_FLEE || a->state == ST_GOTO ||
+                     a->state == ST_CHASE || a->state == ST_FOLLOW;
+        for (int j = 0; moving && j < n; j++) {
+            Pet *b = ps[j];
+            if (b == a || b->state == ST_RIDE || !side_by_side(a, b) || linked(a, b)) continue;
+            if ((mid_x(b) - mid_x(a)) * a->dir <= 0) continue;   // not ahead of it
+            double gap = a->dir > 0 ? (b->x + BOX_L * k) - (a->x + BOX_R * k) : (a->x + BOX_L * k) - (b->x + BOX_R * k);
+            if (gap > 3 * k || gap < -6 * k) continue;           // not there yet, or already tangled up
+            if (sociable(a, now) && sociable(b, now)) greet(a, b);
+            else if (gap < 0.5) bounce_off(a, gap);
+            break;
+        }
+
+        // Someone is dazed: the nearest one free goes over to comfort it.
+        if (a->state == ST_BUMP && a->t >= BUMP_DAZE && a->t < BUMP_DAZE + 5 && !a->buddy) {
+            Pet *best = NULL;
+            for (int j = 0; j < n; j++) {
+                Pet *c = ps[j];
+                if (c == a || !(c->state == ST_IDLE || c->state == ST_WALK) || c->paused || c->buddy ||
+                    c->carrying || !side_by_side(a, c) || fabs(mid_x(c) - mid_x(a)) > 700 * u)
+                    continue;
+                if (!best || fabs(mid_x(c) - mid_x(a)) < fabs(mid_x(best) - mid_x(a))) best = c;
+            }
+            if (best) {
+                best->buddy = a->id;
+                best->role = GO_COMFORT;
+                best->following = 0;
+                set_state(best, ST_GOTO, 0);
+                a->buddy = best->id;
+            }
+        }
+
+        // Sleeping: yawns are catching.
+        if (a->state == ST_SLEEP && a->t % 60 == 30)
+            for (int j = 0; j < n; j++) {
+                Pet *c = ps[j];
+                if (c == a || !sociable(c, now) || !side_by_side(a, c) || fabs(mid_x(c) - mid_x(a)) > 500 * u ||
+                    rr(c, 0, 2))
+                    continue;
+                c->buddy = a->id;
+                c->role = rr(c, 0, 1);   // and then lies down next to it
+                c->social_at = now + SOCIAL_MS;
+                c->following = 0;
+                set_state(c, ST_YAWN, 0);
+            }
+
+        // Being sent away: everyone waves goodbye.
+        if (a->state == ST_LEAVE && a->t < LEAVE_TICKS[a->leave_kind] - 5)
+            for (int j = 0; j < n; j++) {
+                Pet *c = ps[j];
+                int s = c->state;
+                if (c == a || c->buddy == a->id || c->carrying || c->paused || c->area.left != a->area.left ||
+                    !(s == ST_IDLE || s == ST_WALK || s == ST_GREET || s == ST_CHAT || s == ST_CHASE ||
+                      s == ST_FOLLOW || s == ST_YAWN))
+                    continue;
+                c->buddy = a->id;
+                c->dir = mid_x(a) > mid_x(c) ? 1 : -1;
+                c->following = 0;
+                set_state(c, ST_GOODBYE, 0);
+            }
+    }
+
+    // Now and then, a game.
+    if (!next_game) next_game = now + 20000;
+    if (now < next_game) return;
+    next_game = now + (ULONGLONG)rr(ps[0], 30, 90) * 1000;
+    Pet *a = ps[rr(ps[0], 0, n - 1)];
+    if (!sociable(a, now)) return;
+    int first = rr(a, 0, 2);
+    for (int g = 0; g < 3; g++) {
+        int game = (first + g) % 3;
+        if (game == 0 ? start_chase(ps, n, a, now) : game == 1 ? start_line(ps, n, a, now) : start_ride(ps, n, a, now))
+            break;
     }
 }

@@ -157,6 +157,35 @@ static const Glyph GLYPHS[G_COUNT] = {
     [G_TEAR]  = { 1, 1, 1, { "#" } },
     [G_WIND]  = { 3, 1, 1, { "###" } },
     [G_STAR]  = { 3, 3, 0, { ".#.", "###", ".#." } },
+    [G_NOTE]  = { 5, 6, 0, { "..##.", "..#.#", "..#..", "..#..", "###..", "###.." } },
+    [G_SMILE] = { 7, 7, 0, {
+        ".YYYYY.",
+        "YYYYYYY",
+        "YKYYYKY",
+        "YYYYYYY",
+        "YKYYYKY",
+        "YYKKKYY",
+        ".YYYYY.",
+    } },
+    [G_COFFEE] = { 7, 7, 0, {
+        ".#..#..",
+        "..#..#.",
+        "WWWWW..",
+        "WCCCWWW",
+        "WCCCW.W",
+        "WCCCWWW",
+        ".WWW...",
+    } },
+    [G_BULB]  = { 5, 7, 0, {
+        ".YYY.",
+        "YYWYY",
+        "YYYYY",
+        "YYYYY",
+        ".YYY.",
+        ".GGG.",
+        "..G..",
+    } },
+    [G_BOLT]  = { 5, 7, 0, { "...##", "..##.", ".##..", "#####", "..##.", ".##..", "##..." } },
     [G_SOB]   = { 9, 9, 0, {   // loudly crying face
         "..YYYYY..",
         ".YYYYYYY.",
@@ -178,6 +207,9 @@ static uint32_t glyph_color(char ch, uint32_t fill)
     case 'K': return 0x3A2A1A;   // eyes, mouth
     case 'R': return 0xB0303A;   // inside of the mouth
     case 'B': return 0x4FA8FF;   // tears
+    case 'W': return 0xF4F4F4;   // cup
+    case 'C': return 0x6B3E26;   // coffee
+    case 'G': return 0x8A8A8A;   // lamp base
     }
     return 0;
 }
@@ -185,6 +217,11 @@ static uint32_t glyph_color(char ch, uint32_t fill)
 int glyph_width(int g)
 {
     return GLYPHS[g].w;
+}
+
+int glyph_height(int g)
+{
+    return GLYPHS[g].h;
 }
 
 void draw_glyph(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha)
@@ -203,6 +240,26 @@ void draw_glyph(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha)
                 else
                     put(c, x + i, y + j, a | glyph_color(ch, rgb & 0xFFFFFFu));
             }
+}
+
+void draw_speech(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha)
+{
+    const Glyph *gl = &GLYPHS[g];
+    uint32_t a = (uint32_t)alpha << 24, ink = a | 0x202020u, paper = a | 0xFFFFFFu;
+    int x0 = x - 2, y0 = y - 2, x1 = x + gl->w + 1, y1 = y + gl->h + 1, mid = (x0 + x1) / 2;
+    rect(c, x0 + 1, y0, x1 - 1, y1, ink);   // outline, corners cut
+    rect(c, x0, y0 + 1, x1, y1 - 1, ink);
+    rect(c, x0 + 1, y0 + 1, x1 - 1, y1 - 1, paper);
+    rect(c, mid - 1, y1, mid, y1, paper);   // the tail
+    put(c, mid - 2, y1 + 1, ink);
+    rect(c, mid - 1, y1 + 1, mid - 1, y1 + 1, paper);
+    put(c, mid, y1 + 1, ink);
+    put(c, mid - 1, y1 + 2, ink);
+    for (int j = 0; j < gl->h; j++)
+        for (int i = 0; i < gl->w; i++) {
+            char ch = gl->rows[j][i];
+            if (ch != '.') put(c, x + i, y + j, a | glyph_color(ch, rgb & 0xFFFFFFu));
+        }
 }
 
 void cv_scale_premul(const Canvas *c, uint32_t *dst, int k)
