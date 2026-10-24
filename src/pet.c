@@ -144,13 +144,17 @@ static double step_top(const Pet *p, int i)
 
 // How many steps fit between the pet and the edge of the screen in
 // direction dir (the top step's middle ends up n * STEP_W from the pet's),
-// and no higher than half the screen.
+// no taller than half the screen, and not so high (counting the floor it
+// is already perched on) that its head and bubbles would leave the screen.
 static int stairs_room(const Pet *p, int dir)
 {
     double k = p->scale, c = p->x + (SPR_OX + 9) * k;
     double room = dir > 0 ? p->area.right - 8 * k - c : c - (p->area.left + 8 * k);
     int n = room > 0 ? (int)(room / (STEP_W * k)) : 0;
-    int tall = (int)((p->area.bottom - p->area.top) / 2 / (STEP_H * k));
+    double rise = (p->area.bottom - p->area.top) / 2.0;
+    double headroom = p->area.bottom - p->perch - p->area.top - (FOOT_Y + 10) * k;
+    if (rise > headroom) rise = headroom;
+    int tall = rise > 0 ? (int)(rise / (STEP_H * k)) : 0;
     if (n > tall) n = tall;
     return n > MAX_STEPS ? MAX_STEPS : n;
 }
@@ -501,7 +505,7 @@ void pet_startle(Pet *p, double from_x)
 int pet_can_climb(const Pet *p)
 {
     int s = p->state;
-    return !p->perch && !p->stairs.n && !p->paused &&
+    return !p->stairs.n && !p->paused &&
            (s == ST_IDLE || s == ST_WALK || s == ST_TYPE || s == ST_WAVE || s == ST_LAND) &&
            (stairs_room(p, 1) >= 3 || stairs_room(p, -1) >= 3);
 }
@@ -522,7 +526,7 @@ void pet_climb(Pet *p)
     s->crumble_t = -1;
     p->y = ground_y(p);
     s->x0 = p->x + (SPR_OX + 9) * k + dir * 5 * k;
-    s->base = p->area.bottom;
+    s->base = p->area.bottom - p->perch;   // the taskbar, or the height it already climbed to
     for (int i = 0; i < n; i++) s->off[i] = (i + 1) * STEP_H;
     s->shown = 1;
 
@@ -883,7 +887,7 @@ void pet_update(Pet *p, const World *w)
                     p->t = 0;
                     p->dur = 1;
                 } else {                 // the top: stairs crumble away, the floor stays
-                    p->perch = s->base - (p->y + FOOT_Y * k);
+                    p->perch = p->area.bottom - (p->y + FOOT_Y * k);
                     p->perch_until = GetTickCount64() + (ULONGLONG)rr(p, 60, 180) * 1000;
                     stairs_crumble(p);
                     say(p, G_HEART, C_HEART);
