@@ -2,12 +2,17 @@
 #include <math.h>
 
 #define SLEEP_AFTER_MS (5 * 60 * 1000)
-#define LEAVE_SHOCK_TICKS 24
+
+// How long each send-away reaction lasts before the taskbar gives way.
+static const int LEAVE_TICKS[LEAVE_KINDS] = {
+    [LEAVE_SHOCK] = 24, [LEAVE_SHIVER] = 45, [LEAVE_CRY] = 55, [LEAVE_PANIC] = 70,
+};
 
 #define C_HEART 0xFF5A78u
 #define C_EXCL  0xFFD23Fu
 #define C_WHITE 0xFFFFFFu
 #define C_DROP  0x5AB4FFu
+#define C_TEAR  0x4FA8FFu
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -91,6 +96,21 @@ static void spawn_drop(Pet *p)
     Bubble *b = new_bubble(p);
     int side = rr(p, 0, 1);
     if (b) *b = (Bubble){ G_DROP, 24, 24, side ? SPR_OX + 16 : SPR_OX - 1, SPR_OY - 1, side ? 0.05 : -0.05, 0.08, C_DROP };
+}
+
+static void spawn_sob(Pet *p, int life)
+{
+    Bubble *b = new_bubble(p);
+    if (b) *b = (Bubble){ G_SOB, life, life, SPR_OX + 5, SPR_OY - 11, 0, -0.02, 0 };
+}
+
+// A tear arcing out sideways from each (closed) eye of pose q.
+static void spawn_tears(Pet *p, const Pose *q)
+{
+    double y = SPR_OY + q->body_dy + 3;
+    Bubble *b;
+    if ((b = new_bubble(p))) *b = (Bubble){ G_TEAR, 15, 15, SPR_OX + 4, y, -0.35, -0.3, C_TEAR, 0.05 };
+    if ((b = new_bubble(p))) *b = (Bubble){ G_TEAR, 15, 15, SPR_OX + 13, y, 0.35, -0.3, C_TEAR, 0.05 };
 }
 
 /* ---- poses ------------------------------------------------------------ */
@@ -196,6 +216,41 @@ static Pose pose_shock(int t)
     return q;
 }
 
+// Hunched up small, arms hugged in; the shaking itself is Pet.shake.
+static Pose pose_shiver(void)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_WIDE;
+    q.body_dy = 1;
+    q.squash = 1;
+    q.arm_l = q.arm_r = 1;
+    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    return q;
+}
+
+// Eyes squeezed shut, arms hanging, heaving with sobs.
+static Pose pose_cry(int t)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_CLOSED;
+    q.arm_l = q.arm_r = 1;
+    if ((t / 5) % 2) {
+        q.body_dy = 1;
+        for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    }
+    return q;
+}
+
+// Running flat out, eyes wide, arms flailing.
+static Pose pose_panic(int t, int dir)
+{
+    Pose q = pose_walk((t / 2) % 4, dir);
+    q.eyes = EYE_WIDE;
+    q.arm_l = (t / 3) % 2 ? -3 : -1;
+    q.arm_r = (t / 3) % 2 ? -1 : -3;
+    return q;
+}
+
 // Tom-style fright: body yanked out long away from the scare (`look` points
 // back at it), a bit flatter for it, arms flung up, legs rigid.
 static Pose pose_startle(int look)
@@ -227,6 +282,7 @@ int pet_demo_poses(Pose *out, int max)
         pose_sleep(0), pose_sleep(1), pose_stretch(),
         pose_type(0), pose_type(-1), pose_type(1), pose_wave(0), pose_wave(1),
         pose_shock(0), pose_shock(8), pose_shock(14), pose_startle(-1),
+        pose_shiver(), pose_cry(0), pose_cry(5), pose_panic(0, 1), pose_panic(3, 1),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
@@ -329,9 +385,20 @@ void pet_leave(Pet *p)
     p->forced_sleep = 0;
     p->following = 0;
     p->paused = 0;
-    p->vx = 0;
-    p->vy = -5 * unit(p);
-    say(p, G_EXCL, C_EXCL);
+    p->vx = p->vy = 0;
+    p->leave_kind = rr(p, 0, LEAVE_KINDS - 1);
+    switch (p->leave_kind) {
+    case LEAVE_SHOCK:
+        p->vy = -5 * unit(p);   // a little jolt
+        say(p, G_EXCL, C_EXCL);
+        break;
+    case LEAVE_CRY:
+        spawn_sob(p, LEAVE_TICKS[LEAVE_CRY] + 30);
+        break;
+    case LEAVE_PANIC:
+        p->dir = rr(p, 0, 1) ? 1 : -1;
+        break;
+    }
     set_state(p, ST_LEAVE, 0);
 }
 
@@ -353,6 +420,7 @@ void pet_startle(Pet *p, double from_x)
 void pet_update(Pet *p, const World *w)
 {
     double u = unit(p);
+    p->shake = 0;
     refresh_area(p);
     double gy = ground_y(p);
 
@@ -579,31 +647,66 @@ void pet_update(Pet *p, const World *w)
         if (++p->t >= p->dur) set_state(p, ST_IDLE, 60);
         break;
 
-    case ST_LEAVE:
+    case ST_LEAVE: {
+        int react = LEAVE_TICKS[p->leave_kind];
         p->vy += 1.0 * u;
         p->y += p->vy;
-        if (p->t < LEAVE_SHOCK_TICKS) {
-            // Startled on the spot (pet_leave gave it a little jolt)...
+        if (p->t < react) {
+            // Reacting on the spot first...
             if (p->y >= gy) {
                 p->y = gy;
                 p->vy = 0;
             }
-            if (p->t == 10) say(p, G_QUEST, C_WHITE);
-            q = pose_shock(p->t);
+            switch (p->leave_kind) {
+            case LEAVE_SHOCK:
+                if (p->t == 10) say(p, G_QUEST, C_WHITE);
+                q = pose_shock(p->t);
+                break;
+            case LEAVE_SHIVER:
+                p->shake = p->t % 2 ? 1 : -1;
+                if (p->t % 10 == 5) spawn_drop(p);
+                q = pose_shiver();
+                break;
+            case LEAVE_CRY:
+                q = pose_cry(p->t);
+                if (p->t % 3 == 0) spawn_tears(p, &q);
+                break;
+            case LEAVE_PANIC:
+                if (rr(p, 0, 14) == 0) p->dir = -p->dir;
+                p->x += p->dir * 5 * u;
+                if (p->x <= min_x(p)) p->dir = 1;
+                if (p->x >= max_x(p)) p->dir = -1;
+                clamp_walls(p, 0);
+                if (p->t % 18 == 0) say(p, G_EXCL, C_EXCL);
+                if (p->t % 12 == 6) spawn_drop(p);
+                q = pose_panic(p->t, p->dir);
+                break;
+            }
         } else {
             // ...then the taskbar gives way and down it goes.
-            if (p->t == LEAVE_SHOCK_TICKS) p->dropped = 1;
+            if (p->t == react) {
+                p->dropped = 1;
+                if (p->leave_kind == LEAVE_PANIC) p->vx = p->dir * 5 * u;   // still running
+            }
+            p->x += p->vx;
+            clamp_walls(p, 0);
             q = pose_dangle((p->t / 3) % 2);
+            if (p->leave_kind == LEAVE_CRY) {   // and still crying
+                q.eyes = EYE_CLOSED;
+                if (p->t % 3 == 0) spawn_tears(p, &q);
+            }
             if (p->y > p->screen.bottom) p->gone = 1;
         }
         p->t++;
         break;
+    }
     }
     p->pose = q;
 
     for (int i = 0; i < MAX_BUBBLES; i++) {
         Bubble *b = &p->bub[i];
         if (b->life <= 0) continue;
+        b->vy += b->ay;
         b->x += b->vx;
         b->y += b->vy;
         b->life--;
@@ -613,11 +716,12 @@ void pet_update(Pet *p, const World *w)
 void pet_render(const Pet *p, Canvas *c)
 {
     cv_clear(c);
-    draw_clawd(c, SPR_OX, SPR_OY, &p->pose);
+    draw_clawd(c, SPR_OX + p->shake, SPR_OY, &p->pose);
     for (int i = 0; i < MAX_BUBBLES; i++) {
         const Bubble *b = &p->bub[i];
         if (b->life <= 0) continue;
-        int alpha = b->life < 15 ? b->life * 255 / 15 : 255;
+        int fade = b->max < 30 ? b->max / 3 : 15;
+        int alpha = b->life < fade ? b->life * 255 / fade : 255;
         draw_glyph(c, (int)floor(b->x), (int)floor(b->y), b->glyph, b->color, alpha);
     }
 }

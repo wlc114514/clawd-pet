@@ -16,7 +16,7 @@
 
 enum { EYE_OPEN, EYE_CLOSED, EYE_HAPPY, EYE_WIDE };
 enum { PROP_NONE, PROP_KEYBOARD };
-enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_COUNT };
+enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_COUNT };
 
 typedef struct { uint32_t *px; int w, h; } Canvas;   // straight ARGB
 

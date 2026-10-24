@@ -84,16 +84,42 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     }
 }
 
-typedef struct { int w, h; const char *rows[5]; } Glyph;
+// '#' takes the colour passed to draw_glyph; other letters are fixed colours
+// (see glyph_color). Flat glyphs get no dark outline.
+typedef struct { int w, h, flat; const char *rows[9]; } Glyph;
 
 static const Glyph GLYPHS[G_COUNT] = {
-    [G_Z]     = { 4, 4, { "####", "..#.", ".#..", "####" } },
-    [G_ZBIG]  = { 5, 5, { "#####", "...#.", "..#..", ".#...", "#####" } },
-    [G_EXCL]  = { 1, 5, { "#", "#", "#", ".", "#" } },
-    [G_QUEST] = { 3, 5, { "###", "..#", ".##", "...", ".#." } },
-    [G_HEART] = { 5, 5, { ".#.#.", "#####", "#####", ".###.", "..#.." } },
-    [G_DROP]  = { 3, 4, { ".#.", "###", "###", ".#." } },
+    [G_Z]     = { 4, 4, 0, { "####", "..#.", ".#..", "####" } },
+    [G_ZBIG]  = { 5, 5, 0, { "#####", "...#.", "..#..", ".#...", "#####" } },
+    [G_EXCL]  = { 1, 5, 0, { "#", "#", "#", ".", "#" } },
+    [G_QUEST] = { 3, 5, 0, { "###", "..#", ".##", "...", ".#." } },
+    [G_HEART] = { 5, 5, 0, { ".#.#.", "#####", "#####", ".###.", "..#.." } },
+    [G_DROP]  = { 3, 4, 0, { ".#.", "###", "###", ".#." } },
+    [G_TEAR]  = { 1, 1, 1, { "#" } },
+    [G_SOB]   = { 9, 9, 0, {   // loudly crying face
+        "..YYYYY..",
+        ".YYYYYYY.",
+        "YYYYYYYYY",
+        "YKKYYYKKY",
+        "YBYYYYYBY",
+        "YBYKKKYBY",
+        "YBYKRKYBY",
+        ".BYKKKYB.",
+        "..BYYYB..",
+    } },
 };
+
+static uint32_t glyph_color(char ch, uint32_t fill)
+{
+    switch (ch) {
+    case '#': return fill;
+    case 'Y': return 0xFFC93C;   // face
+    case 'K': return 0x3A2A1A;   // eyes, mouth
+    case 'R': return 0xB0303A;   // inside of the mouth
+    case 'B': return 0x4FA8FF;   // tears
+    }
+    return 0;
+}
 
 int glyph_width(int g)
 {
@@ -104,16 +130,17 @@ void draw_glyph(Canvas *c, int x, int y, int g, uint32_t rgb, int alpha)
 {
     const Glyph *gl = &GLYPHS[g];
     uint32_t a = (uint32_t)alpha << 24;
-    uint32_t outline = a | 0x202020u, fill = a | (rgb & 0xFFFFFFu);
+    uint32_t outline = a | 0x202020u;
 
-    for (int pass = 0; pass < 2; pass++)
+    for (int pass = gl->flat; pass < 2; pass++)
         for (int j = 0; j < gl->h; j++)
             for (int i = 0; i < gl->w; i++) {
-                if (gl->rows[j][i] != '#') continue;
+                char ch = gl->rows[j][i];
+                if (ch == '.') continue;
                 if (pass == 0)
                     rect(c, x + i - 1, y + j - 1, x + i + 1, y + j + 1, outline);
                 else
-                    put(c, x + i, y + j, fill);
+                    put(c, x + i, y + j, a | glyph_color(ch, rgb & 0xFFFFFFu));
             }
 }
 

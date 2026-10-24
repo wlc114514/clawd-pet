@@ -7,10 +7,11 @@ enum {
     ST_TYPE,   // sitting at a keyboard (user typing / Claude Code working)
     ST_WAVE,   // Claude Code needs the user
     ST_FLEE,   // running away from the cursor
-    ST_LEAVE,  // being sent away: startled, then drops through the taskbar
+    ST_LEAVE,  // being sent away: a reaction (see LEAVE_*), then drops through the taskbar
     ST_STARTLE,// cartoon leap backwards, freezing at the top
 };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
+enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
 
 // Everything outside the pet that it reacts to, sampled once per tick.
@@ -28,9 +29,10 @@ typedef struct {
     int glyph, life, max;
     double x, y, vx, vy;   // canvas coordinates
     uint32_t color;
+    double ay;             // gravity
 } Bubble;
 
-#define MAX_BUBBLES 8
+#define MAX_BUBBLES 16
 
 typedef struct {
     double x, y, vx, vy;   // window top-left, screen px; velocity in px/tick
@@ -38,6 +40,8 @@ typedef struct {
     int dir, look, look_t, blink_t;
     int scale;
     int paused, forced_sleep, following;
+    int leave_kind;        // LEAVE_*, picked at random when sent away
+    int shake;             // sprite x offset this tick (shivering)
     int gone;              // finished leaving; the window can be destroyed
     int dropped;           // event: just fell through the taskbar (cleared by the caller)
     int tap_t, tap_side;

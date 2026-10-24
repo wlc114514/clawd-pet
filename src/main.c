@@ -704,9 +704,18 @@ static int write_sheet(const wchar_t *path)
         if (i < n) {
             draw_clawd(&c, SPR_OX, SPR_OY, &poses[i]);
         } else {
-            static const uint32_t col[] = { 0xFFFFFF, 0xFFFFFF, 0xFFD23F, 0xFFFFFF, 0xFF5A78, 0x5AB4FF };
-            for (int g = 0; g < G_COUNT; g++)
-                draw_glyph(&c, 2 + (g % 3) * 9, 4 + (g / 3) * 9, g, col[g], 255);
+            static const uint32_t col[G_COUNT] = {
+                [G_Z] = 0xFFFFFF, [G_ZBIG] = 0xFFFFFF, [G_EXCL] = 0xFFD23F, [G_QUEST] = 0xFFFFFF,
+                [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF,
+            };
+            for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
+                if (x + glyph_width(g) > CW - 1) {
+                    x = 2;
+                    y += 11;
+                }
+                draw_glyph(&c, x, y, g, col[g], 255);
+                x += glyph_width(g) + 3;
+            }
         }
         cv_scale_premul(&c, cell, k);
         for (int row = 0; row < 2; row++) {
