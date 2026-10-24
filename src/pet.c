@@ -14,6 +14,13 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 #define C_DROP  0x5AB4FFu
 #define C_TEAR  0x4FA8FFu
 
+#define C_STONE   0xFF9C9A94u
+#define C_STONE_L 0xFFC4C2BBu
+#define C_MORTAR  0xFF7A7872u
+#define C_OUTLINE 0xFF3E3C38u
+
+#define HOP_TICKS 7
+
 /* ---- helpers ---------------------------------------------------------- */
 
 static unsigned rnd(Pet *p)
@@ -31,7 +38,7 @@ static int rr(Pet *p, int lo, int hi)
 
 // Physics constants are tuned for scale 4 and scaled from there.
 static double unit(const Pet *p) { return p->scale / 4.0; }
-static double ground_y(const Pet *p) { return p->area.bottom - FOOT_Y * p->scale; }
+static double ground_y(const Pet *p) { return p->area.bottom - p->perch - FOOT_Y * p->scale; }
 static double min_x(const Pet *p) { return p->area.left - (SPR_OX + 1) * p->scale; }
 static double max_x(const Pet *p) { return p->area.right - (SPR_OX + 17) * p->scale; }
 
@@ -111,6 +118,59 @@ static void spawn_tears(Pet *p, const Pose *q)
     Bubble *b;
     if ((b = new_bubble(p))) *b = (Bubble){ G_TEAR, 15, 15, SPR_OX + 4, y, -0.35, -0.3, C_TEAR, 0.05 };
     if ((b = new_bubble(p))) *b = (Bubble){ G_TEAR, 15, 15, SPR_OX + 13, y, 0.35, -0.3, C_TEAR, 0.05 };
+}
+
+/* ---- stairs ----------------------------------------------------------- */
+
+// Screen x of the middle of step i, and y of its top surface.
+static double step_cx(const Pet *p, int i)
+{
+    const Stairs *s = &p->stairs;
+    return s->x0 + s->dir * (i * STEP_W + STEP_W / 2.0) * s->scale;
+}
+
+static double step_top(const Pet *p, int i)
+{
+    return p->stairs.base - (i + 1) * STEP_H * p->stairs.scale;
+}
+
+// How many steps fit between the pet and the edge of the screen in
+// direction dir (the top step's middle ends up n * STEP_W from the pet's),
+// and no higher than half the screen.
+static int stairs_room(const Pet *p, int dir)
+{
+    double k = p->scale, c = p->x + (SPR_OX + 9) * k;
+    double room = dir > 0 ? p->area.right - 8 * k - c : c - (p->area.left + 8 * k);
+    int n = room > 0 ? (int)(room / (STEP_W * k)) : 0;
+    int tall = (int)((p->area.bottom - p->area.top) / 2 / (STEP_H * k));
+    if (n > tall) n = tall;
+    return n > MAX_STEPS ? MAX_STEPS : n;
+}
+
+static void stairs_crumble(Pet *p)
+{
+    if (p->stairs.n && p->stairs.crumble_t < 0) p->stairs.crumble_t = 0;
+}
+
+// Steps rise out of the taskbar; when crumbling they drop back through it,
+// bottom step first.
+static void stairs_update(Pet *p)
+{
+    Stairs *s = &p->stairs;
+    if (!s->n) return;
+    int gone = 0;
+    for (int i = 0; i < s->shown; i++) {
+        double depth = (i + 1) * STEP_H;   // this far down it is out of sight
+        if (s->crumble_t >= i * 3) {
+            s->vy[i] += 0.4;
+            s->off[i] += s->vy[i];
+        } else if (s->off[i] > 0) {
+            s->off[i] -= depth / 4;
+            if (s->off[i] < 0) s->off[i] = 0;
+        }
+        gone += s->off[i] >= depth;
+    }
+    if (s->crumble_t >= 0 && ++s->crumble_t > 0 && gone == s->shown) s->n = 0;
 }
 
 /* ---- poses ------------------------------------------------------------ */
@@ -310,6 +370,11 @@ void pet_init(Pet *p, int scale, unsigned seed)
 
 void pet_set_scale(Pet *p, int scale)
 {
+    if (p->state == ST_CLIMB) {   // the stairs were built for the old size
+        stairs_crumble(p);
+        p->vx = p->vy = 0;
+        set_state(p, ST_FALL, 0);
+    }
     // Keep the feet where they are.
     p->x += (CW * p->scale - CW * scale) / 2.0;
     p->y += FOOT_Y * p->scale - FOOT_Y * scale;
@@ -325,6 +390,8 @@ POINT pet_head(const Pet *p)
 void pet_begin_drag(Pet *p, POINT grab)
 {
     if (p->state == ST_LEAVE) return;   // no rescuing it mid-fall
+    if (p->state == ST_CLIMB) stairs_crumble(p);
+    p->perch = 0;                       // let go and it lands on the taskbar
     p->drag_dx = grab.x - (int)p->x;
     p->drag_dy = grab.y - (int)p->y;
     p->vx = p->vy = 0;
@@ -375,13 +442,18 @@ void pet_cheer(Pet *p)
 
 void pet_sleep(Pet *p)
 {
-    if (p->state == ST_DRAG || p->state == ST_LEAVE) return;
+    if (p->state == ST_DRAG || p->state == ST_LEAVE || p->state == ST_CLIMB) return;
     p->forced_sleep = 1;
     set_state(p, ST_SLEEP, 0);
 }
 
 void pet_leave(Pet *p)
 {
+    if (p->state == ST_CLIMB) {   // react right where it is on the stairs
+        stairs_crumble(p);
+        p->perch = p->area.bottom - (p->y + FOOT_Y * p->scale);
+        if (p->perch < 0) p->perch = 0;
+    }
     p->forced_sleep = 0;
     p->following = 0;
     p->paused = 0;
@@ -417,16 +489,93 @@ void pet_startle(Pet *p, double from_x)
     set_state(p, ST_STARTLE, 6);         // dur = ticks frozen at the apex
 }
 
+int pet_can_climb(const Pet *p)
+{
+    int s = p->state;
+    return !p->perch && !p->stairs.n && !p->paused &&
+           (s == ST_IDLE || s == ST_WALK || s == ST_TYPE || s == ST_WAVE || s == ST_LAND) &&
+           (stairs_room(p, 1) >= 3 || stairs_room(p, -1) >= 3);
+}
+
+void pet_climb(Pet *p)
+{
+    if (!pet_can_climb(p)) return;
+    double k = p->scale;
+    int n = rr(p, 5, MAX_STEPS), dir = rr(p, 0, 1) ? 1 : -1;
+    if (stairs_room(p, dir) < n && stairs_room(p, -dir) > stairs_room(p, dir)) dir = -dir;
+    if (stairs_room(p, dir) < n) n = stairs_room(p, dir);
+
+    Stairs *s = &p->stairs;
+    ZeroMemory(s, sizeof *s);
+    s->n = n;
+    s->dir = dir;
+    s->scale = p->scale;
+    s->crumble_t = -1;
+    p->y = ground_y(p);
+    s->x0 = p->x + (SPR_OX + 9) * k + dir * 5 * k;
+    s->base = p->area.bottom;
+    for (int i = 0; i < n; i++) s->off[i] = (i + 1) * STEP_H;
+    s->shown = 1;
+
+    p->dir = p->look = dir;
+    p->vx = p->vy = 0;
+    p->following = 0;
+    p->forced_sleep = 0;
+    p->climb_i = 0;
+    p->climb_ph = 0;
+    set_state(p, ST_CLIMB, 8);
+}
+
+int pet_stairs(const Pet *p, Canvas *c, POINT *origin)
+{
+    const Stairs *s = &p->stairs;
+    if (!s->n) return 0;
+    int W = s->n * STEP_W + 2, H = s->n * STEP_H + 1, k = s->scale;
+    c->w = W;
+    c->h = H;
+    cv_clear(c);
+
+    // Step i is a column of i + 1 staggered bricks.
+    for (int i = 0; i < s->shown; i++) {
+        int x0 = 1 + (s->dir > 0 ? i : s->n - 1 - i) * STEP_W, off = (int)floor(s->off[i]);
+        for (int r = 0; r <= i; r++) {
+            int top = H - (r + 1) * STEP_H + off;
+            for (int y = top < 0 ? 0 : top; y < top + STEP_H && y < H; y++)
+                for (int x = x0; x < x0 + STEP_W; x++) {
+                    uint32_t col = C_STONE;
+                    if (y == top || (x - x0 + (r % 2) * STEP_W / 2) % STEP_W == 0) col = C_MORTAR;
+                    else if (r == i && y == top + 1) col = C_STONE_L;
+                    c->px[y * W + x] = col;
+                }
+        }
+    }
+    // Dark outline wherever stone meets air (the bottom edge continues
+    // under the taskbar).
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint32_t *px = &c->px[y * W + x];
+            if (!*px) continue;
+            int air = y == 0 || x == 0 || x == W - 1 || !px[-W] || !px[-1] || !px[1] ||
+                      (y < H - 1 && !px[W]);
+            if (air) *px = C_OUTLINE;
+        }
+
+    origin->x = (LONG)floor(s->x0 + 0.5) - (s->dir > 0 ? 1 : s->n * STEP_W + 1) * k;
+    origin->y = (LONG)floor(s->base + 0.5) - H * k;
+    return 1;
+}
+
 void pet_update(Pet *p, const World *w)
 {
     double u = unit(p);
     p->shake = 0;
     refresh_area(p);
+    stairs_update(p);
     double gy = ground_y(p);
 
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
-        p->state != ST_LEAVE && p->state != ST_STARTLE) {
+        p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB) {
         if (p->y < gy - 0.5) {
             p->vx = p->vy = 0;
             set_state(p, ST_FALL, 0);
@@ -439,7 +588,7 @@ void pet_update(Pet *p, const World *w)
     // Cursor relative to the pet: horizontal offset from the sprite centre,
     // and height above the floor it stands on.
     double dxm = w->cursor.x - (p->x + (SPR_OX + 9) * p->scale);
-    double dym = p->area.bottom - w->cursor.y;
+    double dym = p->area.bottom - p->perch - w->cursor.y;
     int cursor_live = w->cursor_still_ms < 3000;
     int hover = fabs(dxm) < 9 * p->scale && dym >= 0 && dym < 12 * p->scale;
 
@@ -493,6 +642,18 @@ void pet_update(Pet *p, const World *w)
         }
         if (w->cpu > 0.8 && p->t % 90 == 45) spawn_drop(p);
         if (++p->t >= p->dur) {
+            if (p->perch && GetTickCount64() >= p->perch_until) {   // seen enough: jump down
+                say(p, G_HEART, C_HEART);
+                p->perch = 0;
+                p->vx = p->dir * 2 * u;
+                p->vy = -9 * u;
+                set_state(p, ST_JUMP, 0);
+                break;
+            }
+            if (w->climb && pet_can_climb(p) && rr(p, 0, 99) < 3) {
+                pet_climb(p);
+                break;
+            }
             int walk_pct = w->mouse_mode == MOUSE_FOLLOW ? 0 : 60 + (int)(30 * w->cpu);
             int r = rr(p, 0, 99);
             if (r < walk_pct) {
@@ -629,6 +790,52 @@ void pet_update(Pet *p, const World *w)
             set_state(p, ST_IDLE, rr(p, 40, 120));
         }
         break;
+
+    case ST_CLIMB: {
+        const Stairs *s = &p->stairs;
+        double k = s->scale;
+        int i = p->climb_i;
+        q.look = s->dir;
+        if (p->climb_ph == 0) {          // eyeing the step coming up
+            if (blinking) q.eyes = EYE_CLOSED;
+            if (s->off[i] <= 0 && ++p->t >= p->dur) {
+                p->hop_x = p->x;
+                p->hop_y = p->y;
+                p->climb_ph = 1;
+                p->t = 0;
+                if (p->stairs.shown < s->n) p->stairs.shown++;   // the next one starts rising
+            }
+        } else if (p->climb_ph == 1) {   // hop, one step up and along
+            double f = (double)++p->t / HOP_TICKS;
+            double tx = step_cx(p, i) - (SPR_OX + 9) * k, ty = step_top(p, i) - FOOT_Y * k;
+            p->x = p->hop_x + (tx - p->hop_x) * f;
+            p->y = p->hop_y + (ty - p->hop_y) * f - 16 * k * f * (1 - f);
+            q = pose_hop(f < 0.5);
+            q.look = s->dir;
+            if (p->t >= HOP_TICKS) {
+                p->climb_ph = 2;
+                p->t = 0;
+            }
+        } else {                         // landed
+            q = pose_land(0);
+            q.look = s->dir;
+            if (++p->t >= 3) {
+                if (i + 1 < s->n) {
+                    p->climb_i++;
+                    p->climb_ph = 0;
+                    p->t = 0;
+                    p->dur = 1;
+                } else {                 // the top: stairs crumble away, the floor stays
+                    p->perch = s->base - (p->y + FOOT_Y * k);
+                    p->perch_until = GetTickCount64() + (ULONGLONG)rr(p, 60, 180) * 1000;
+                    stairs_crumble(p);
+                    say(p, G_HEART, C_HEART);
+                    set_state(p, ST_IDLE, rr(p, 40, 90));
+                }
+            }
+        }
+        break;
+    }
 
     case ST_SLEEP:
         q = pose_sleep((p->t / 40) % 2);

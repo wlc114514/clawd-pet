@@ -25,7 +25,7 @@ enum {
     IDM_PAUSE = 100, IDM_SLEEP, IDM_SIZE_S, IDM_SIZE_M, IDM_SIZE_L, IDM_AUTOSTART, IDM_EXIT,
     IDM_MOUSE_OFF, IDM_MOUSE_FOLLOW, IDM_MOUSE_SHY, IDM_TYPING, IDM_FULLSCREEN,
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
-    IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER,
+    IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -45,6 +45,14 @@ typedef struct {
     int dib_k, dirty, hidden;
     POINT prev_pos;
     uint32_t px[CW * CH], prev_px[CW * CH];
+    // the stairs it is climbing, in a click-through window of their own
+    HWND st_hwnd;
+    HDC st_dc;
+    HBITMAP st_dib;
+    uint32_t *st_bits;
+    int st_w, st_h, st_k;
+    POINT st_pos;
+    uint32_t st_px[STAIRS_CW * STAIRS_CH], st_prev[STAIRS_CW * STAIRS_CH];
 } PetWin;
 
 static HINSTANCE g_inst;
@@ -58,7 +66,7 @@ static UINT g_dpi = 96;
 // settings (persisted)
 static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscreen = 1, g_water = 0;
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
-static int g_feat_pomo = 1, g_feat_water = 1;     // features shown in the menu
+static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
 
 // runtime
 static World g_world;
@@ -166,6 +174,56 @@ static void present(PetWin *pw)
     UpdateLayeredWindow(pw->hwnd, NULL, &pos, &sz, pw->memdc, &src, 0, &bf, ULW_ALPHA);
 }
 
+static void stairs_destroy(PetWin *pw)
+{
+    if (!pw->st_hwnd) return;
+    DestroyWindow(pw->st_hwnd);
+    DeleteDC(pw->st_dc);
+    if (pw->st_dib) DeleteObject(pw->st_dib);
+    pw->st_hwnd = NULL;
+    pw->st_dc = NULL;
+    pw->st_dib = NULL;
+}
+
+static void present_stairs(PetWin *pw)
+{
+    Canvas cv = { pw->st_px, 0, 0 };
+    POINT pos;
+    if (!pet_stairs(&pw->pet, &cv, &pos)) {
+        stairs_destroy(pw);
+        return;
+    }
+    int k = pw->pet.stairs.scale, first = !pw->st_hwnd;
+    if (first) {
+        pw->st_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                                      WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
+                                      NULL, NULL, g_inst, NULL);
+        pw->st_dc = CreateCompatibleDC(NULL);
+    }
+    if (first || cv.w != pw->st_w || cv.h != pw->st_h || k != pw->st_k) {
+        HBITMAP dib = make_dib(cv.w * k, cv.h * k, &pw->st_bits);
+        SelectObject(pw->st_dc, dib);
+        if (pw->st_dib) DeleteObject(pw->st_dib);
+        pw->st_dib = dib;
+        pw->st_w = cv.w;
+        pw->st_h = cv.h;
+        pw->st_k = k;
+    } else if (pos.x == pw->st_pos.x && pos.y == pw->st_pos.y &&
+               !memcmp(pw->st_px, pw->st_prev, sizeof(uint32_t) * cv.w * cv.h)) {
+        return;
+    }
+    pw->st_pos = pos;
+    memcpy(pw->st_prev, pw->st_px, sizeof(uint32_t) * cv.w * cv.h);
+
+    cv_scale_premul(&cv, pw->st_bits, k);
+    SIZE sz = { cv.w * k, cv.h * k };
+    POINT src = { 0, 0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(pw->st_hwnd, NULL, &pos, &sz, pw->st_dc, &src, 0, &bf, ULW_ALPHA);
+    if (first)   // just below its pet
+        SetWindowPos(pw->st_hwnd, pw->hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
 static HICON make_icon(int size)
 {
     // The sprite's visible part is 16x10 (x 1..16), so it fits a 16px icon exactly.
@@ -241,6 +299,7 @@ static void destroy_pet(int idx)
     PetWin *pw = g_pets[idx];
     if (g_press_pw == pw) g_press_pw = NULL;
     tb_destroy(&pw->tb);
+    stairs_destroy(pw);
     DestroyWindow(pw->hwnd);
     DeleteDC(pw->memdc);
     if (pw->dib) DeleteObject(pw->dib);
@@ -293,6 +352,7 @@ static void sample_input(void)
     g_world.typing = g_typing_on && g_last_key_at && now - g_last_key_at < 1500;
     g_world.mouse_mode = g_mouse_mode;
     g_world.cc = g_cc;
+    g_world.climb = g_feat_climb;
 }
 
 static ULONGLONG ft64(FILETIME f)
@@ -319,7 +379,7 @@ static int is_own_window(HWND h)
     wchar_t cls[32];
     GetClassNameW(h, cls, 32);
     return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS) ||
-           !wcscmp(cls, L"ClawdPicker");
+           !wcscmp(cls, L"ClawdPicker") || !wcscmp(cls, L"ClawdStairs");
 }
 
 // Monitor covered by a fullscreen foreground window (game, video, slides), or NULL.
@@ -438,7 +498,10 @@ static void tick(void)
             pw->hidden = hide;
             pw->dirty = 1;
             ShowWindow(pw->hwnd, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
-            if (hide) tb_suspend(&pw->tb);
+            if (hide) {
+                tb_suspend(&pw->tb);
+                stairs_destroy(pw);   // rebuilt from the pet's state when it comes back
+            }
         }
         if (hide) {
             if (pw->pet.state == ST_LEAVE) pw->pet.gone = 1;   // nobody to see the fall
@@ -446,9 +509,12 @@ static void tick(void)
         }
         pet_update(&pw->pet, &g_world);
         present(pw);
+        present_stairs(pw);
         tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
         if (n % 60 == 0) {   // the taskbar likes to climb above us; text bubbles go above pets
             SetWindowPos(pw->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (pw->st_hwnd)
+                SetWindowPos(pw->st_hwnd, pw->hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             if (pw->tb.shown)
                 SetWindowPos(pw->tb.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
@@ -532,10 +598,14 @@ static void show_menu(PetWin *pw)
 
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_pomo), IDM_FEAT_POMO, L"番茄钟");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_climb), IDM_FEAT_CLIMB, L"爬楼梯");
 
-    int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused;
+    int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
+    for (int i = 0; i < g_npets; i++)
+        if (!pw || g_pets[i] == pw) can_climb |= pet_can_climb(&g_pets[i]->pet);
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
+    if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)mouse, L"鼠标互动");
     AppendMenuW(m, MF_STRING | CHECK(g_typing_on), IDM_TYPING, L"打字时陪你敲");
     if (g_feat_pomo || g_feat_water) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -583,6 +653,14 @@ static void show_menu(PetWin *pw)
     case IDM_SLEEP:
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_sleep(&g_pets[i]->pet);
+        break;
+    case IDM_CLIMB:
+        for (int i = 0; i < g_npets; i++)
+            if (!pw || g_pets[i] == pw) pet_climb(&g_pets[i]->pet);
+        break;
+    case IDM_FEAT_CLIMB:
+        g_feat_climb = !g_feat_climb;
+        reg_set_dword(L"FeatClimb", (DWORD)g_feat_climb);
         break;
     case IDM_MOUSE_OFF:
     case IDM_MOUSE_FOLLOW:
@@ -824,6 +902,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_water_next = GetTickCount64() + (ULONGLONG)WATER_MIN[g_water] * 60000;
     g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
+    g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
     g_pomo_focus = (int)reg_get_dword(L"PomoFocus", 25);
     if (g_pomo_focus < FOCUS_LO || g_pomo_focus > FOCUS_HI || g_pomo_focus % FOCUS_STEP) g_pomo_focus = 25;
     g_pomo_break = clampi((int)reg_get_dword(L"PomoBreak", 5), BREAK_LO, BREAK_HI, 5);
@@ -839,6 +918,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     RegisterClassW(&wc);
     wc.lpfnWndProc = host_proc;
     wc.lpszClassName = HOST_CLASS;
+    RegisterClassW(&wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpszClassName = L"ClawdStairs";
     RegisterClassW(&wc);
     tb_register(inst);
     picker_register(inst);
