@@ -84,6 +84,7 @@ typedef struct {
     int dir, look, look_t, blink_t;
     int scale;
     int paused, forced_sleep, following;
+    int typist;            // sits down to type along with the user / Claude Code (only the first pet)
     int leave_kind;        // LEAVE_*, picked at random when sent away
     int shake;             // sprite x offset this tick (shivering)
     int gone;              // finished leaving; the window can be destroyed

@@ -393,6 +393,7 @@ static PetWin *spawn_pet(int drop_in)
     if (g_npets >= MAX_PETS) return NULL;
     PetWin *pw = calloc(1, sizeof *pw);
     pet_init(&pw->pet, scale_for(g_size), GetTickCount() ^ ((unsigned)g_npets * 0x9E3779B9u));
+    pw->pet.typist = !g_npets;   // only the first one types along
     if (drop_in) pw->pet.y = pw->pet.area.top - CH * pw->pet.scale;   // falls from the sky
     pw->prev_pos.x = pw->prev_pos.y = INT_MIN;
     pw->dirty = 1;

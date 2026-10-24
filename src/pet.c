@@ -875,7 +875,7 @@ void pet_update(Pet *p, const World *w)
 
     if (is_free(p->state)) {
         int want = -1;
-        if (w->cc == CLAUDE_WORKING || w->typing)
+        if (p->typist && (w->cc == CLAUDE_WORKING || w->typing))
             want = ST_TYPE;
         else if (w->cc == CLAUDE_WAITING)
             want = ST_WAVE;
@@ -1576,17 +1576,6 @@ static void greet(Pet *a, Pet *b)
     say(b, rr(b, 0, 1) ? G_EXCL : G_HEART, rr(b, 0, 1) ? C_EXCL : C_HEART);
 }
 
-// Bumped into another pet: a little hop back, and off the other way.
-static void bounce_off(Pet *p, double gap)
-{
-    if (gap < 0) p->x += p->dir * gap;
-    p->dir = -p->dir;
-    p->following = 0;
-    p->vx = p->dir * 2 * unit(p);
-    p->vy = -5 * unit(p);
-    set_state(p, ST_JUMP, 0);
-}
-
 static int start_chase(Pet **ps, int n, Pet *a, ULONGLONG now)
 {
     for (int i = 0; i < n; i++) {
@@ -1892,7 +1881,7 @@ void pets_together(Pet **ps, int n, const World *w)
             }
         }
 
-        // Walking into another pet: say hello, or bounce off it.
+        // Walking into another pet: say hello if both are free, else walk on through.
         int moving = a->state == ST_WALK || a->state == ST_FLEE || a->state == ST_GOTO ||
                      a->state == ST_CHASE || a->state == ST_FOLLOW;
         for (int j = 0; moving && j < n; j++) {
@@ -1900,9 +1889,8 @@ void pets_together(Pet **ps, int n, const World *w)
             if (b == a || b->state == ST_RIDE || !side_by_side(a, b) || linked(a, b)) continue;
             if ((mid_x(b) - mid_x(a)) * a->dir <= 0) continue;   // not ahead of it
             double gap = a->dir > 0 ? (b->x + BOX_L * k) - (a->x + BOX_R * k) : (a->x + BOX_L * k) - (b->x + BOX_R * k);
-            if (gap > 3 * k || gap < -6 * k) continue;           // not there yet, or already tangled up
+            if (gap > 3 * k || gap < -6 * k) continue;           // not there yet, or already past
             if (sociable(a, now) && sociable(b, now)) greet(a, b);
-            else if (gap < 0.5) bounce_off(a, gap);
             break;
         }
 

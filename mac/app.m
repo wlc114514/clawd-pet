@@ -608,6 +608,7 @@ static int write_sheet(const char *path)
     Pet p;
     pet_init(&p, scale_for(g_size), (unsigned)plat_ticks_ms() ^ ((unsigned)g_pets.count * 0x9E3779B9u));
     if (dropIn) p.y = p.area.top - CH * p.scale;   // falls from the sky
+    p.typist = g_pets.count == 0;   // only the first one types along
     PetWindow *pw = [[PetWindow alloc] initWithPet:p];
     [g_pets addObject:pw];
     return pw;
