@@ -776,11 +776,27 @@ static void show_menu(PetWin *pw)
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
     for (int i = 0; i < g_npets; i++)
         if (!pw || g_pets[i] == pw) can_climb |= pet_can_climb(&g_pets[i]->pet);
+    // Settings live in one submenu; the top level is things to do right now.
+    HMENU set = CreatePopupMenu();
+    AppendMenuW(set, MF_POPUP, (UINT_PTR)sz, L"大小");
+    if (g_feat_climb) {
+        HMENU st = CreatePopupMenu();
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SLAB), IDM_STAIRS_SLAB, L"悬空石板");
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SOLID), IDM_STAIRS_SOLID, L"实心石砖");
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_OUTLINE), IDM_STAIRS_OUTLINE, L"只有轮廓线");
+        AppendMenuW(set, MF_POPUP, (UINT_PTR)st, L"楼梯样式");
+    }
+    AppendMenuW(set, MF_POPUP, (UINT_PTR)mouse, L"鼠标互动");
+    AppendMenuW(set, MF_POPUP, (UINT_PTR)feat, L"功能开关");
+    AppendMenuW(set, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(set, MF_STRING | CHECK(g_typing_on), IDM_TYPING, L"打字时陪你敲");
+    AppendMenuW(set, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
+    AppendMenuW(set, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
+    AppendMenuW(set, MF_STRING | CHECK(cli_enabled()), IDM_CLI, L"终端里可用 clawd 命令");
+
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)mouse, L"鼠标互动");
-    AppendMenuW(m, MF_STRING | CHECK(g_typing_on), IDM_TYPING, L"打字时陪你敲");
     if (g_feat_pomo || g_feat_water) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     if (g_feat_pomo && g_pomo) {
         HMENU pomo = CreatePopupMenu();
@@ -802,18 +818,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
     AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"大小");
-    if (g_feat_climb) {
-        HMENU st = CreatePopupMenu();
-        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SLAB), IDM_STAIRS_SLAB, L"悬空石板");
-        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SOLID), IDM_STAIRS_SOLID, L"实心石砖");
-        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_OUTLINE), IDM_STAIRS_OUTLINE, L"只有轮廓线");
-        AppendMenuW(m, MF_POPUP, (UINT_PTR)st, L"楼梯样式");
-    }
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)feat, L"功能开关");
-    AppendMenuW(m, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
-    AppendMenuW(m, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
-    AppendMenuW(m, MF_STRING | CHECK(cli_enabled()), IDM_CLI, L"终端里可用 clawd 命令");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)set, L"设置");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
 
@@ -1015,7 +1020,7 @@ static int write_sheet(const wchar_t *path)
         } else {
             static const uint32_t col[G_COUNT] = {
                 [G_Z] = 0xFFFFFF, [G_ZBIG] = 0xFFFFFF, [G_EXCL] = 0xFFD23F, [G_QUEST] = 0xFFFFFF,
-                [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF,
+                [G_HEART] = 0xFF5A78, [G_DROP] = 0x5AB4FF, [G_TEAR] = 0x4FA8FF, [G_WIND] = 0xCFE8FF,
             };
             for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
                 if (x + glyph_width(g) > CW - 1) {

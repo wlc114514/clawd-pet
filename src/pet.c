@@ -105,6 +105,14 @@ static void spawn_drop(Pet *p)
     if (b) *b = (Bubble){ G_DROP, 24, 24, side ? SPR_OX + 16 : SPR_OX - 1, SPR_OY - 1, side ? 0.05 : -0.05, 0.08, C_DROP };
 }
 
+// A gust streaking from the fan across the pet.
+static void spawn_wind(Pet *p)
+{
+    Bubble *b = new_bubble(p);
+    double x = p->fan_side > 0 ? CW - FAN_W - 3 : FAN_W;
+    if (b) *b = (Bubble){ G_WIND, 11, 11, x, SPR_OY + rr(p, 1, 6), -p->fan_side * 0.9, 0, 0xCFE8FFu };
+}
+
 static void spawn_sob(Pet *p, int life)
 {
     Bubble *b = new_bubble(p);
@@ -634,6 +642,8 @@ void pet_update(Pet *p, const World *w)
             want = ST_TYPE;
         else if (w->cc == CLAUDE_WAITING)
             want = ST_WAVE;
+        else if (w->heat > 1)   // too hot to roam: stay put by the fan
+            want = w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS ? ST_SLEEP : ST_IDLE;
         else if (w->mouse_mode == MOUSE_SHY && cursor_live && fabs(dxm) < 140 * u && dym > -20 * u && dym < 160 * u)
             want = ST_FLEE;
         else if (w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS)
@@ -664,9 +674,13 @@ void pet_update(Pet *p, const World *w)
         }
         q.look = p->look;
         q.eyes = hover ? EYE_HAPPY : blinking ? EYE_CLOSED : EYE_OPEN;
+        if (p->fan) {   // face into the breeze, eyes shut in bliss
+            q.look = p->fan_side;
+            q.eyes = blinking ? EYE_OPEN : EYE_HAPPY;
+        }
         if (p->paused) break;
 
-        if (w->mouse_mode == MOUSE_FOLLOW && fabs(dxm) > 70 * u) {
+        if (w->mouse_mode == MOUSE_FOLLOW && w->heat < 2 && fabs(dxm) > 70 * u) {
             int dir = dxm > 0 ? 1 : -1;
             int at_wall = (dir < 0 && p->x <= min_x(p) + 1) || (dir > 0 && p->x >= max_x(p) - 1);
             if (!at_wall) {
@@ -676,8 +690,7 @@ void pet_update(Pet *p, const World *w)
                 break;
             }
         }
-        if (w->heat && p->t % (w->heat > 1 ? 30 : 90) == 15) spawn_drop(p);
-        if (w->heat > 1) q.arm_r = (p->t / 2) % 2 ? -4 : -2;   // fanning itself
+        if (w->heat == 1 && p->t % 90 == 15) spawn_drop(p);
         if (++p->t >= p->dur) {
             if (p->perch && GetTickCount64() >= p->perch_until) {   // seen enough: jump down
                 say(p, G_HEART, C_HEART);
@@ -685,6 +698,10 @@ void pet_update(Pet *p, const World *w)
                 p->vx = p->dir * 2 * u;
                 p->vy = -9 * u;
                 set_state(p, ST_JUMP, 0);
+                break;
+            }
+            if (w->heat > 1) {   // no wandering off from the fan
+                set_state(p, ST_IDLE, rr(p, 60, 180));
                 break;
             }
             if (w->climb && pet_can_climb(p) && rr(p, 0, 99) < 3) {
@@ -950,6 +967,16 @@ void pet_update(Pet *p, const World *w)
     }
     p->pose = q;
 
+    // The fan comes out when it's hot and the pet is staying in one place,
+    // on the side facing the middle of the screen.
+    int still = p->state == ST_IDLE || p->state == ST_TYPE || p->state == ST_WAVE ||
+                p->state == ST_SLEEP || p->state == ST_WAKE;
+    int fan = w->heat > 1 && still;
+    if (fan && !p->fan)
+        p->fan_side = p->x + (SPR_OX + 9) * p->scale < (p->area.left + p->area.right) / 2.0 ? 1 : -1;
+    p->fan = fan;
+    if (fan && ++p->fan_t % 7 == 0) spawn_wind(p);
+
     for (int i = 0; i < MAX_BUBBLES; i++) {
         Bubble *b = &p->bub[i];
         if (b->life <= 0) continue;
@@ -963,6 +990,7 @@ void pet_update(Pet *p, const World *w)
 void pet_render(const Pet *p, Canvas *c)
 {
     cv_clear(c);
+    if (p->fan) draw_fan(c, p->fan_side > 0 ? CW - FAN_W : 0, FOOT_Y - FAN_H, (p->fan_t / 2) % 2);
     draw_clawd(c, SPR_OX + p->shake, SPR_OY, &p->pose);
     for (int i = 0; i < MAX_BUBBLES; i++) {
         const Bubble *b = &p->bub[i];

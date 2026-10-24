@@ -84,6 +84,30 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     }
 }
 
+/*
+ * Desk fan, front view: a round cage with spinning blades on a stand.
+ *   c = cage, b = blade, h = hub, s = stand
+ */
+static const char *const FAN[2][FAN_H] = {
+    { "..ccc..", ".c...c.", "c..b..c", "c.bhb.c", "c..b..c", ".c...c.", "..ccc..", "...s...", "...s...", ".sssss." },
+    { "..ccc..", ".c...c.", "c.b.b.c", "c..h..c", "c.b.b.c", ".c...c.", "..ccc..", "...s...", "...s...", ".sssss." },
+};
+
+void draw_fan(Canvas *c, int x, int y, int frame)
+{
+    for (int j = 0; j < FAN_H; j++)
+        for (int i = 0; i < FAN_W; i++) {
+            uint32_t col = 0;
+            switch (FAN[frame & 1][j][i]) {
+            case 'c': col = 0xFF4A5560u; break;
+            case 'b': col = 0xFFBFE3FFu; break;
+            case 'h': col = 0xFF2B2B2Bu; break;
+            case 's': col = 0xFF6B6B6Bu; break;
+            }
+            if (col) put(c, x + i, y + j, col);
+        }
+}
+
 // '#' takes the colour passed to draw_glyph; other letters are fixed colours
 // (see glyph_color). Flat glyphs get no dark outline.
 typedef struct { int w, h, flat; const char *rows[9]; } Glyph;
@@ -96,6 +120,7 @@ static const Glyph GLYPHS[G_COUNT] = {
     [G_HEART] = { 5, 5, 0, { ".#.#.", "#####", "#####", ".###.", "..#.." } },
     [G_DROP]  = { 3, 4, 0, { ".#.", "###", "###", ".#." } },
     [G_TEAR]  = { 1, 1, 1, { "#" } },
+    [G_WIND]  = { 3, 1, 1, { "###" } },
     [G_SOB]   = { 9, 9, 0, {   // loudly crying face
         "..YYYYY..",
         ".YYYYYYY.",

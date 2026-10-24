@@ -69,6 +69,7 @@ typedef struct {
     int gone;              // finished leaving; the window can be destroyed
     int dropped;           // event: just fell through the taskbar (cleared by the caller)
     int thrown;            // flying after being let go mid-drag (gets air drag)
+    int fan, fan_side, fan_t;   // desk fan out (too hot); which side (-1 left / +1 right); spin ticks
     int tap_t, tap_side;
     Stairs stairs;
     int climb_i, climb_ph;  // step being climbed to; 0 wait, 1 hop, 2 land
