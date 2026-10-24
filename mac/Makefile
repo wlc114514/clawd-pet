@@ -10,7 +10,7 @@
 APP      = build/Clawd.app
 BIN      = $(APP)/Contents/MacOS/Clawd
 SRC_C    = ../src/pet.c ../src/render.c
-SRC_M    = app.m pet_window.m bubble.m picker.m plat_mac.m walls.m
+SRC_M    = app.m pet_window.m bubble.m picker.m plat_mac.m walls.m wardrobe.m
 HEADERS  = mac.h ../src/pet.h ../src/render.h ../src/platform.h ../src/pomo.h
 
 CC       = clang

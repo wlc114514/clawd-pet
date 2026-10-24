@@ -29,7 +29,7 @@ enum {
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
-    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR,
+    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -438,8 +438,8 @@ static NSImage *status_icon(void)
 
 static int write_sheet(const char *path)
 {
-    Pose poses[32];
-    int n = pet_demo_poses(poses, 32);
+    Pose poses[64];
+    int n = pet_demo_poses(poses, 64);
     // Glyphs after the poses, in as many cells as they need.
     int gcell[G_COUNT], gx[G_COUNT], gy[G_COUNT], gcells = 1;
     for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
@@ -681,6 +681,9 @@ static int write_sheet(const char *path)
     }
     // Sort out what they do together, then draw.
     pets_together(live, nlive, &g_world);
+    int dressing = [Wardrobe pet], found = 0;   // close the wardrobe if its pet has gone
+    for (int i = 0; i < nlive; i++) found |= live[i]->id == dressing && live[i]->state != ST_LEAVE;
+    if (dressing && !found) [Wardrobe close];
     for (PetWindow *pw in g_pets) {
         Pet *p = pw.pet;
         if (pw.hiddenByFullscreen) continue;
@@ -840,6 +843,7 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
 
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
+    add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
     if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb, self);
     add_item(m, @"放置围墙", IDM_WALL_DRAW, NO, walls_count() < MAX_WALLS && !walls_drawing(), self);
     if (walls_count()) add_item(m, @"拆掉所有围墙", IDM_WALL_CLEAR, NO, YES, self);
@@ -942,6 +946,16 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
         g_typing_on = !g_typing_on;
         ud_set(@"Typing", g_typing_on);
         break;
+    case IDM_WARDROBE: {   // from the menu bar: the first one
+        if (!g_pets.count) break;
+        const Pet *p = pw ? pw.pet : g_pets[0].pet;
+        [Wardrobe openAt:pet_head(p) area:p->area pet:p->id wear:p->wear
+                 changed:^(int petId, const unsigned char *wear) {
+            for (PetWindow *o in g_pets)
+                if (o.pet->id == petId) pet_dress(o.pet, wear);
+        }];
+        break;
+    }
     case IDM_POMO_START: {
         if (!g_pets.count) break;
         const Pet *p = pw ? pw.pet : g_pets[0].pet;

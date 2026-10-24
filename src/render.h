@@ -19,6 +19,15 @@ enum { PROP_NONE, PROP_KEYBOARD };
 enum { G_Z, G_ZBIG, G_EXCL, G_QUEST, G_HEART, G_DROP, G_TEAR, G_SOB, G_WIND, G_STAR,
        G_NOTE, G_SMILE, G_COFFEE, G_BULB, G_BOLT, G_COUNT };
 
+// Accessories, at most one per slot (Pose.wear), drawn on top of the sprite.
+enum { SLOT_HEAD, SLOT_FACE, SLOT_MOUTH, SLOT_NECK, SLOT_HAND, SLOTS };
+enum { ACC_NONE, ACC_BOWLER, ACC_CROWN, ACC_BEANIE, ACC_PHONES,   // head
+       ACC_MONOCLE, ACC_GLASSES, ACC_SHADES,                     // face
+       ACC_HANDLEBAR, ACC_PENCIL, ACC_WALRUS, ACC_GOATEE,        // mouth
+       ACC_SCARF, ACC_BOWTIE,                                    // neck
+       ACC_COFFEE, ACC_FRAPPE, ACC_CHIPS, ACC_WATCH,             // hand
+       ACC_COUNT };
+
 #define FAN_W 7    // desk fan prop, drawn standing on the floor beside the pet
 #define FAN_H 10
 
@@ -33,10 +42,21 @@ typedef struct {
     int legs[4];      // leg length below the body, 0..3
     int prop;         // PROP_*, drawn in front of the body, behind the arms
     int stretch_x;    // body pulled sideways by n px (+ right, - left); eyes stay put
+    unsigned char wear[SLOTS];   // ACC_* in each slot
+    int tick;         // clock for the accessories' own animation (steam)
 } Pose;
 
 void cv_clear(Canvas *c);
+// The sprite with its top-left at (ox, oy), and whatever it wears.
 void draw_clawd(Canvas *c, int ox, int oy, const Pose *p);
+// Only what it wears, where draw_clawd would put it.
+void draw_outfit(Canvas *c, int ox, int oy, const Pose *p);
+int  acc_slot(int a);
+const char *acc_name(int a);     // UTF-8
+const char *slot_name(int s);    // UTF-8
+int  acc_above(const unsigned char *wear);   // rows the hat adds above the head
+// Dresses at random: each slot has its own chance of getting something.
+void outfit_roll(unsigned char *wear, unsigned *rng);
 // Fan with its top-left at (x, y); frame alternates the blades (+ / x).
 void draw_fan(Canvas *c, int x, int y, int frame);
 // Fills all of c (c->w by c->h) with red brick, courses along its longer side.

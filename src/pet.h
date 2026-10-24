@@ -104,6 +104,8 @@ typedef struct {
     double goal_x;          // where it is heading: screen x of the middle of the sprite
     int carrying;           // id of the pet standing on its head, 0 = none
     ULONGLONG social_at;    // no new games before this
+    unsigned char wear[SLOTS];  // ACC_* per slot, rolled at random in pet_init
+    unsigned age;           // ticks since pet_init
     int drag_dx, drag_dy;
     int zcount;
     RECT area;             // work area of the monitor the pet is on
@@ -124,6 +126,7 @@ void pet_cheer(Pet *p);
 void pet_sleep(Pet *p);
 void pet_leave(Pet *p);
 void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x
+void pet_dress(Pet *p, const unsigned char *wear);   // new outfit (SLOTS entries)
 int  pet_can_climb(const Pet *p);
 void pet_climb(Pet *p);
 // Renders the stairs (if any) in STAIRS_* style into c, which must hold

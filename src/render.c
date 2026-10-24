@@ -32,6 +32,8 @@ static void rect(Canvas *c, int x0, int y0, int x1, int y1, uint32_t col)
         for (int x = x0; x <= x1; x++) put(c, x, y, col);
 }
 
+static void draw_wear(Canvas *c, int ox, int oy, const Pose *p, int layer);
+
 void cv_clear(Canvas *c)
 {
     memset(c->px, 0, sizeof(uint32_t) * c->w * c->h);
@@ -46,6 +48,13 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     int sl = p->stretch_x < 0 ? p->stretch_x : 0, sr = p->stretch_x > 0 ? p->stretch_x : 0;
     rect(c, ox + 3 + sl, top, ox + 14 + sr, bot, COL_BODY);
 
+    for (int i = 0; i < 4; i++) {
+        int lx = ox + LEG_X[i] + (i < 2 ? sl : sr);
+        if (p->legs[i] > 0) rect(c, lx, bot + 1, lx, bot + p->legs[i], COL_BODY);
+    }
+
+    draw_wear(c, ox, oy, p, 0);   // scarf / bow tie: on the body, behind the keyboard
+
     if (p->prop == PROP_KEYBOARD) {
         int ky = oy + 6 + dy;
         rect(c, ox, ky, ox + 17, ky + 1, COL_KB);
@@ -55,11 +64,6 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
     int ay = oy + 4 + dy;
     rect(c, ox + 1 + sl, ay + p->arm_l, ox + 2 + sl, ay + p->arm_l + 1, COL_BODY);
     rect(c, ox + 15 + sr, ay + p->arm_r, ox + 16 + sr, ay + p->arm_r + 1, COL_BODY);
-
-    for (int i = 0; i < 4; i++) {
-        int lx = ox + LEG_X[i] + (i < 2 ? sl : sr);
-        if (p->legs[i] > 0) rect(c, lx, bot + 1, lx, bot + p->legs[i], COL_BODY);
-    }
 
     int ey = top + 2;
     int ex[2] = { ox + 5 + p->look, ox + 12 + p->look };
@@ -87,6 +91,251 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p)
             }
             put(c, x, ey + 1, COL_EYE);
             break;
+        }
+    }
+    draw_wear(c, ox, oy, p, 1);
+}
+
+/*
+ * Accessories. Hats and moustaches go by the top row of the head (y
+ * relative to it; moustaches also turn with the eyes), neckwear by the
+ * body's unsquashed top, what it holds by the right hand; glasses are drawn
+ * around the eyes in draw_wear(). Letters are colours, see acc_color().
+ */
+typedef struct { int slot; const char *name; int x, y, h; const char *rows[7]; } Acc;
+
+static const Acc ACCS[ACC_COUNT] = {
+    [ACC_BOWLER]  = { SLOT_HEAD, "圆顶礼帽", 2, -5, 5, {
+        "....ffffff....",
+        "...fhhfffff...",
+        "...ffffffff...",
+        "f..bbbbbbbb..f",
+        ".ffffffffffff.",
+    } },
+    [ACC_CROWN]   = { SLOT_HEAD, "小皇冠", 5, -4, 4, {
+        "Y..YY..Y",
+        "YY.YY.YY",
+        "YYYYYYYY",
+        "YoYrrYoY",
+    } },
+    [ACC_BEANIE]  = { SLOT_HEAD, "毛线帽", 2, -5, 7, {
+        "......ww......",   // the bobble: swings the other way to where it looks
+        "....rrrrrr....",
+        "..rrrrrrrrrr..",
+        ".cccccccccccc.",
+        ".rrrrrrrrrrrr.",
+        "cCcCcCcCcCcCcC",
+        "cCcCcCcCcCcCcC",
+    } },
+    [ACC_PHONES]  = { SLOT_HEAD, "头戴耳机", 2, -2, 6, {
+        "....gggggg....",
+        "..gg......gg..",
+        ".g..........g.",
+        "pp..........pp",
+        "pP..........Pp",
+        "pp..........pp",
+    } },
+    [ACC_MONOCLE] = { SLOT_FACE, "单片眼镜" },
+    [ACC_GLASSES] = { SLOT_FACE, "圆框眼镜" },
+    [ACC_SHADES]  = { SLOT_FACE, "墨镜" },
+    [ACC_HANDLEBAR] = { SLOT_MOUTH, "八字胡", 4, 3, 3, {
+        "m........m",
+        "mm..mm..mm",
+        ".mmmmmmmm.",
+    } },
+    [ACC_PENCIL]  = { SLOT_MOUTH, "一字胡", 6, 4, 1, { "mmmmmm" } },
+    [ACC_WALRUS]  = { SLOT_MOUTH, "大浓胡", 4, 4, 3, {
+        ".mmmmmmmm.",
+        "mmmmmmmmmm",
+        "m.mm..mm.m",
+    } },
+    [ACC_GOATEE]  = { SLOT_MOUTH, "山羊胡", 7, 6, 3, {   // the tip hangs below the chin
+        "mmmm",
+        ".mm.",
+        ".mm.",
+    } },
+    [ACC_SCARF]   = { SLOT_NECK, "围巾", 3, 4, 6, {   // knitted stripes, the end hanging down the front
+        "rrccrrccrrcc",
+        "rccrrccrrccr",
+        ".rcc........",
+        ".ccr........",
+        ".rcc........",
+        ".r.c........",
+    } },
+    [ACC_BOWTIE]  = { SLOT_NECK, "蝴蝶结", 6, 5, 3, {
+        "rr..rr",
+        "rrRRrr",
+        "rr..rr",
+    } },
+    [ACC_COFFEE]  = { SLOT_HAND, "咖啡", 0, -2, 5, {
+        "llll",
+        "wwww",
+        "ssss",
+        "ssss",
+        ".ww.",
+    } },
+    [ACC_FRAPPE]  = { SLOT_HAND, "星巴克", 0, -4, 7, {   // iced, in a clear cup with a green straw
+        "..e.",
+        ".wew",
+        "wwww",
+        "dddd",
+        "deed",
+        "dddd",
+        ".dd.",
+    } },
+    [ACC_CHIPS]   = { SLOT_HAND, "薯片", 0, -3, 6, {
+        "RrRr",
+        "rrrr",
+        "rYYr",
+        "rYYr",
+        "rrrr",
+        "RrRr",
+    } },
+    [ACC_WATCH]   = { SLOT_HAND, "手表", -2, -2, 5, {   // face on the wrist, strap showing above and below
+        ".k.",
+        "YYY",
+        "YwY",
+        "YYY",
+        ".k.",
+    } },
+};
+
+static uint32_t acc_color(char ch)
+{
+    switch (ch) {
+    case 'k': return 0xFF2B2B2Bu;   // frames
+    case 'f': return 0xFF3D3B40u;   // felt
+    case 'h': return 0xFF66636Bu;   // its sheen
+    case 'b': return 0xFF9A3F2Eu;   // hat band
+    case 'Y': return 0xFFF2C23Au;   // gold
+    case 'o': return 0xFFC8902Au;   // darker gold
+    case 'r': return 0xFFD94848u;   // red
+    case 'R': return 0xFFA83232u;   // dark red
+    case 'c': return 0xFFF2EDE4u;   // cream wool
+    case 'C': return 0xFFD5CBBAu;   // its ribbing
+    case 'w': return 0xFFFFFFFFu;   // white
+    case 'g': return 0xFF55555Au;   // headband
+    case 'p': return 0xFF35B5A8u;   // ear cups
+    case 'P': return 0xFF23857Bu;
+    case 'l': return 0xFFE4E4E4u;   // lid
+    case 's': return 0xFFB07A4Au;   // cardboard sleeve
+    case 'm': return 0xFF3B2A20u;   // moustache
+    case 'e': return 0xFF00704Au;   // green: straw, logo
+    case 'd': return 0xFFD9B48Au;   // iced coffee
+    }
+    return 0;
+}
+
+int acc_slot(int a)
+{
+    return ACCS[a].slot;
+}
+
+const char *acc_name(int a)
+{
+    return a > ACC_NONE && a < ACC_COUNT ? ACCS[a].name : "";
+}
+
+const char *slot_name(int s)
+{
+    static const char *const N[SLOTS] = { "头", "脸", "嘴", "脖子", "手" };
+    return N[s];
+}
+
+int acc_above(const unsigned char *wear)
+{
+    int a = wear[SLOT_HEAD];
+    return a ? -ACCS[a].y : 0;
+}
+
+void outfit_roll(unsigned char *wear, unsigned *rng)
+{
+    static const int chance[SLOTS] = { 45, 30, 20, 30, 30 };   // percent
+    for (int s = 0; s < SLOTS; s++) {
+        int pick[ACC_COUNT], n = 0;
+        for (int a = 1; a < ACC_COUNT; a++)
+            if (ACCS[a].slot == s) pick[n++] = a;
+        unsigned r[2];
+        for (int i = 0; i < 2; i++) {
+            *rng ^= *rng << 13;
+            *rng ^= *rng >> 17;
+            *rng ^= *rng << 5;
+            r[i] = *rng;
+        }
+        wear[s] = r[0] % 100 < (unsigned)chance[s] ? (unsigned char)pick[r[1] % (unsigned)n] : ACC_NONE;
+    }
+}
+
+// rows of ACCS[a] with their top-left at (x, y); `bob` shifts the first row.
+static void draw_art(Canvas *c, int a, int x, int y, int bob, int floor_y)
+{
+    const Acc *ac = &ACCS[a];
+    for (int j = 0; j < ac->h && y + j < floor_y; j++)
+        for (int i = 0; ac->rows[j][i]; i++) {
+            uint32_t col = acc_color(ac->rows[j][i]);
+            if (col) put(c, x + i + (j ? 0 : bob), y + j, col);
+        }
+}
+
+// One lens around the eye at (x, ey): a ring, or a dark shade.
+static void lens(Canvas *c, int x, int ey, uint32_t col, int filled)
+{
+    if (filled) {
+        rect(c, x - 2, ey, x + 2, ey, col);
+        rect(c, x - 1, ey + 1, x + 1, ey + 1, col);
+        put(c, x - 1, ey, 0xFF5A5A5Au);   // glint
+        return;
+    }
+    rect(c, x - 1, ey - 1, x + 1, ey - 1, col);
+    rect(c, x - 1, ey + 2, x + 1, ey + 2, col);
+    rect(c, x - 2, ey, x - 2, ey + 1, col);
+    rect(c, x + 2, ey, x + 2, ey + 1, col);
+}
+
+// Layer 0 is neckwear, worn on the body under any keyboard and the hands;
+// layer 1 is everything else, on top.
+static void draw_wear(Canvas *c, int ox, int oy, const Pose *p, int layer)
+{
+    int dy = p->body_dy, base = oy + dy;
+    int top = base + (p->squash > 0) - (p->squash < 0);
+    int sr = p->stretch_x > 0 ? p->stretch_x : 0;
+    int floor_y = oy + 10;   // nothing hangs below the feet
+    int a;
+
+    if (layer == 0) {   // what the keyboard goes in front of
+        if ((a = p->wear[SLOT_NECK])) draw_art(c, a, ox + ACCS[a].x, base + ACCS[a].y, 0, floor_y);
+        if ((a = p->wear[SLOT_MOUTH])) draw_art(c, a, ox + ACCS[a].x + p->look, top + ACCS[a].y, 0, floor_y);
+        return;
+    }
+
+    int ey = top + 2, ex[2] = { ox + 5 + p->look, ox + 12 + p->look };
+    switch (p->wear[SLOT_FACE]) {
+    case ACC_GLASSES:
+        lens(c, ex[0], ey, 0xFF2B2B2Bu, 0);
+        lens(c, ex[1], ey, 0xFF2B2B2Bu, 0);
+        rect(c, ex[0] + 3, ey, ex[1] - 3, ey, 0xFF2B2B2Bu);   // bridge
+        break;
+    case ACC_MONOCLE:
+        lens(c, ex[1], ey, 0xFFF2C23Au, 0);
+        put(c, ex[1] + 2, ey + 3, 0xFFC8902Au);   // chain
+        put(c, ex[1] + 2, ey + 5, 0xFFC8902Au);
+        break;
+    case ACC_SHADES:
+        rect(c, ex[0] - 2, ey - 1, ex[1] + 2, ey - 1, 0xFF1E1E1Eu);
+        lens(c, ex[0], ey, 0xFF1E1E1Eu, 1);
+        lens(c, ex[1], ey, 0xFF1E1E1Eu, 1);
+        break;
+    }
+
+    if ((a = p->wear[SLOT_HEAD])) draw_art(c, a, ox + ACCS[a].x, top + ACCS[a].y, a == ACC_BEANIE ? -p->look : 0, floor_y);
+
+    if ((a = p->wear[SLOT_HAND])) {
+        int hx = ox + 17 + sr, hy = oy + 4 + dy + p->arm_r;
+        draw_art(c, a, hx + ACCS[a].x, hy + ACCS[a].y, 0, floor_y);
+        if (a == ACC_COFFEE) {   // a wisp of steam
+            int f = (p->tick / 8) % 2;
+            put(c, hx + 1 + f, hy - 3, 0xA0D8D8D8u);
+            put(c, hx + 2 - f, hy - 4, 0x80D8D8D8u);
         }
     }
 }
@@ -277,4 +526,10 @@ void cv_scale_premul(const Canvas *c, uint32_t *dst, int k)
         }
         for (int j = 1; j < k; j++) memcpy(row + (size_t)j * dw, row, (size_t)dw * 4);
     }
+}
+
+void draw_outfit(Canvas *c, int ox, int oy, const Pose *p)
+{
+    draw_wear(c, ox, oy, p, 0);
+    draw_wear(c, ox, oy, p, 1);
 }

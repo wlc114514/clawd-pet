@@ -12,6 +12,7 @@
 #include "pet.h"
 #include "bubble.h"
 #include "picker.h"
+#include "wardrobe.h"
 #include "wall.h"
 
 #define WM_TRAY    (WM_APP + 1)
@@ -31,7 +32,7 @@ enum {
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
-    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR,
+    IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -553,7 +554,7 @@ static int is_own_window(HWND h)
     GetClassNameW(h, cls, 32);
     return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS) ||
            !wcscmp(cls, L"ClawdPicker") || !wcscmp(cls, L"ClawdStairs") || !wcscmp(cls, L"ClawdWall") ||
-           !wcscmp(cls, L"ClawdWallDraw");
+           !wcscmp(cls, L"ClawdWallDraw") || !wcscmp(cls, L"ClawdWardrobe");
 }
 
 // Monitor covered by a fullscreen foreground window (game, video, slides), or NULL.
@@ -693,6 +694,9 @@ static void tick(void)
         live[nlive++] = &pw->pet;
     }
     pets_together(live, nlive, &g_world);
+    int dressing = wardrobe_pet(), found = 0;   // close the wardrobe if its pet has gone
+    for (int i = 0; i < nlive; i++) found |= live[i]->id == dressing && live[i]->state != ST_LEAVE;
+    if (dressing && !found) wardrobe_close();
     for (int i = 0; i < g_npets; i++) {
         PetWin *pw = g_pets[i];
         if (pw->hidden) continue;
@@ -777,6 +781,13 @@ static void pomo_start(int focus, int brk)
     update_tooltip();
 }
 
+// Called by the wardrobe on every change.
+static void dressed(int id, const unsigned char *wear)
+{
+    for (int i = 0; i < g_npets; i++)
+        if (g_pets[i]->pet.id == id) pet_dress(&g_pets[i]->pet, wear);
+}
+
 #define CHECK(cond) ((cond) ? MF_CHECKED : 0)
 
 static void show_menu(PetWin *pw)
@@ -819,6 +830,7 @@ static void show_menu(PetWin *pw)
 
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
+    AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
     if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? 0 : MF_GRAYED), IDM_CLIMB, L"爬上去");
     AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
                 L"放置围墙");
@@ -897,6 +909,11 @@ static void show_menu(PetWin *pw)
         g_typing_on = !g_typing_on;
         reg_set_dword(L"Typing", (DWORD)g_typing_on);
         break;
+    case IDM_WARDROBE: {   // from the tray: the first one
+        const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
+        wardrobe_open(pet_head(p), p->area, g_dpi, p->id, p->wear, dressed);
+        break;
+    }
     case IDM_POMO_START: {
         const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
         picker_open(pet_head(p), p->area, g_dpi, g_pomo_focus, g_pomo_break, pomo_start);
@@ -1039,8 +1056,8 @@ static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static int write_sheet(const wchar_t *path)
 {
-    Pose poses[32];
-    int n = pet_demo_poses(poses, 32);
+    Pose poses[64];
+    int n = pet_demo_poses(poses, 64);
     // Glyphs after the poses, in as many cells as they need.
     int gcell[G_COUNT], gx[G_COUNT], gy[G_COUNT], gcells = 1;
     for (int g = 0, x = 2, y = 3; g < G_COUNT; g++) {
@@ -1171,6 +1188,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     RegisterClassW(&wc);
     tb_register(inst);
     picker_register(inst);
+    wardrobe_register(inst);
 
     // Hidden top-level window: owns the tray icon, timer and hook messages.
     g_host = CreateWindowExW(WS_EX_TOOLWINDOW, HOST_CLASS, L"Clawd", WS_POPUP, 0, 0, 0, 0, NULL, NULL, inst, NULL);

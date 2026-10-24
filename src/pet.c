@@ -243,7 +243,9 @@ static void spawn_chat(Pet *p)
     static const uint32_t col[] = { C_HEART, C_NOTE, 0, 0xB8B8B8u, 0, 0xF2A007u, 0x3A3A3Au, 0xE0533Au };
     int i = rr(p, 0, 7), g = pick[i], w = glyph_width(g), h = glyph_height(g);
     Bubble *b = new_bubble(p);
-    if (b) *b = (Bubble){ g, 34, 34, SPR_OX + 9 - w / 2, SPR_OY - 4 - h, 0, 0, col[i], 0, 1 };
+    int y = SPR_OY - 4 - h - acc_above(p->wear);
+    if (y < 2) y = 2;   // as high as it goes; the bubble covers the top of a tall hat
+    if (b) *b = (Bubble){ g, 34, 34, SPR_OX + 9 - w / 2, y, 0, 0, col[i], 0, 1 };
 }
 
 static void spawn_sob(Pet *p, int life)
@@ -530,9 +532,34 @@ int pet_demo_poses(Pose *out, int max)
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
-    int n = (int)(sizeof all / sizeof all[0]);
-    if (n > max) n = max;
-    for (int i = 0; i < n; i++) out[i] = all[i];
+    int n = 0;
+    for (int i = 0; i < (int)(sizeof all / sizeof all[0]) && n < max; i++) out[n++] = all[i];
+
+    // Then each accessory on its own, and a few outfits in other poses.
+    Pose more[] = {
+        pose_walk(0, 1), pose_walk(2, -1), pose_type(1), pose_sleep(0), pose_wave(0),
+        pose_dazed(0), pose_land(0), pose_stretch(), pose_startle(-1),
+    };
+    static const unsigned char outfits[][SLOTS + 1] = {   // index into `more`, then the slots
+        { 0, ACC_BEANIE, 0, 0, ACC_SCARF, ACC_COFFEE },
+        { 1, ACC_BEANIE, ACC_SHADES, ACC_GOATEE, ACC_SCARF, ACC_CHIPS },
+        { 2, ACC_PHONES, ACC_GLASSES, ACC_PENCIL, ACC_BOWTIE, ACC_WATCH },
+        { 2, ACC_BEANIE, 0, ACC_WALRUS, ACC_SCARF, ACC_FRAPPE },
+        { 3, ACC_BOWLER, ACC_MONOCLE, ACC_HANDLEBAR, ACC_BOWTIE, 0 },
+        { 4, ACC_CROWN, ACC_SHADES, 0, 0, ACC_FRAPPE },
+        { 5, ACC_BOWLER, ACC_GLASSES, ACC_WALRUS, ACC_SCARF, 0 },
+        { 6, ACC_CROWN, 0, ACC_HANDLEBAR, ACC_BOWTIE, ACC_COFFEE },
+        { 7, ACC_PHONES, ACC_MONOCLE, 0, ACC_SCARF, ACC_CHIPS },
+        { 8, ACC_BEANIE, ACC_GLASSES, ACC_PENCIL, ACC_BOWTIE, ACC_WATCH },
+    };
+    for (int a = 1; a < ACC_COUNT && n < max; a++) {
+        out[n] = pose_stand();
+        out[n++].wear[acc_slot(a)] = (unsigned char)a;
+    }
+    for (int i = 0; i < (int)(sizeof outfits / sizeof outfits[0]) && n < max; i++) {
+        out[n] = more[outfits[i][0]];
+        memcpy(out[n++].wear, outfits[i] + 1, SLOTS);
+    }
     return n;
 }
 
@@ -551,7 +578,18 @@ void pet_init(Pet *p, int scale, unsigned seed)
     p->dir = 1;
     p->blink_t = rr(p, 30, 90);
     set_state(p, ST_IDLE, 45);
+    outfit_roll(p->wear, &p->rng);
     p->pose = pose_stand();
+    memcpy(p->pose.wear, p->wear, sizeof p->wear);
+}
+
+void pet_dress(Pet *p, const unsigned char *wear)
+{
+    int added = 0;
+    for (int s = 0; s < SLOTS; s++) added |= wear[s] && wear[s] != p->wear[s];
+    memcpy(p->wear, wear, sizeof p->wear);
+    memcpy(p->pose.wear, wear, sizeof p->wear);
+    if (added && (is_free(p->state) || is_social(p->state))) say(p, G_HEART, C_HEART);   // likes it
 }
 
 void pet_set_scale(Pet *p, int scale)
@@ -569,7 +607,8 @@ void pet_set_scale(Pet *p, int scale)
 
 POINT pet_head(const Pet *p)
 {
-    POINT h = { (LONG)(p->x + (SPR_OX + 9) * p->scale), (LONG)(p->y + (SPR_OY - 2) * p->scale) };
+    POINT h = { (LONG)(p->x + (SPR_OX + 9) * p->scale),
+                (LONG)(p->y + (SPR_OY - 2 - acc_above(p->wear)) * p->scale) };
     return h;
 }
 
@@ -990,6 +1029,7 @@ void pet_update(Pet *p, const World *w)
         }
         q = pose_type(p->tap_t > 0 ? p->tap_side : 0);
         if (p->tap_t > 0) p->tap_t--;
+        if (p->wear[SLOT_HEAD] == ACC_PHONES) q.squash = (p->t / 6) % 2;   // nodding along to the music
         if (blinking) q.eyes = EYE_CLOSED;
         p->t++;
         break;
@@ -1386,6 +1426,8 @@ void pet_update(Pet *p, const World *w)
         break;
     }
     }
+    memcpy(q.wear, p->wear, sizeof q.wear);
+    q.tick = (int)p->age++;
     p->pose = q;
 
     // The fan comes out when it's hot and the pet is staying in one place,
@@ -1505,7 +1547,7 @@ static void knock_off(Pet *r, Pet *carrier)
 static double ride_y(const Pet *c)
 {
     const Pose *q = &c->pose;
-    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0);
+    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0) - acc_above(c->wear);   // on top of the hat
     return c->y + top * c->scale - FOOT_Y * c->scale;
 }
 

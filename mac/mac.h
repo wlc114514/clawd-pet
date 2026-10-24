@@ -90,3 +90,13 @@ void walls_hide_on(NSSet<NSNumber *> *displays);    // displays behind a fullscr
           done:(void (^)(int focus, int brk))done;
 + (void)close;
 @end
+
+/* ---- wardrobe ---------------------------------------------------------- */
+// Dressing one pet (menu: 换装…): a preview, every accessory to click on and
+// off, random / take everything off. Each change goes straight to changed.
+@interface Wardrobe : NSObject
++ (void)openAt:(POINT)anchor area:(RECT)area pet:(int)petId wear:(const unsigned char *)wear
+       changed:(void (^)(int petId, const unsigned char *wear))changed;
++ (int)pet;   // id of the pet being dressed, 0 if closed
++ (void)close;
+@end
