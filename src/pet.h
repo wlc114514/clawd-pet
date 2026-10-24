@@ -44,6 +44,8 @@ typedef struct {
 #define STAIRS_CW (MAX_STEPS * STEP_W + 2)
 #define STAIRS_CH (MAX_STEPS * STEP_H + 1)
 
+enum { STAIRS_SLAB, STAIRS_SOLID, STAIRS_OUTLINE, STAIRS_STYLES };
+
 typedef struct {
     int n;                 // steps in this staircase, 0 = none
     int shown;             // steps that have started rising out of the taskbar
@@ -65,6 +67,7 @@ typedef struct {
     int shake;             // sprite x offset this tick (shivering)
     int gone;              // finished leaving; the window can be destroyed
     int dropped;           // event: just fell through the taskbar (cleared by the caller)
+    int thrown;            // flying after being let go mid-drag (gets air drag)
     int tap_t, tap_side;
     Stairs stairs;
     int climb_i, climb_ph;  // step being climbed to; 0 wait, 1 hop, 2 land
@@ -93,9 +96,10 @@ void pet_leave(Pet *p);
 void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x
 int  pet_can_climb(const Pet *p);
 void pet_climb(Pet *p);
-// Renders the stairs (if any) into c, which must hold STAIRS_CW x STAIRS_CH;
-// sets c->w, c->h and the screen position of the top-left corner.
-int  pet_stairs(const Pet *p, Canvas *c, POINT *origin);
+// Renders the stairs (if any) in STAIRS_* style into c, which must hold
+// STAIRS_CW x STAIRS_CH; sets c->w, c->h and the screen position of the
+// top-left corner.
+int  pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin);
 POINT pet_head(const Pet *p);   // screen point just above the head
 
 Pose pose_stand(void);

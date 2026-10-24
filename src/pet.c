@@ -408,6 +408,7 @@ void pet_end_drag(Pet *p)
     if (p->vx > lim) p->vx = lim;
     if (p->vx < -lim) p->vx = -lim;
     if (p->vy < -lim) p->vy = -lim;
+    p->thrown = 1;
     set_state(p, ST_FALL, 0);
 }
 
@@ -526,7 +527,27 @@ void pet_climb(Pet *p)
     set_state(p, ST_CLIMB, 8);
 }
 
-int pet_stairs(const Pet *p, Canvas *c, POINT *origin)
+static void stairs_fill(Canvas *c, int x0, int y0, int x1, int y1, uint32_t col)
+{
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < c->h; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < c->w; x++) c->px[y * c->w + x] = col;
+}
+
+// A row of bricks h tall with its top at y; `cap` lights up the top surface.
+static void stairs_bricks(Canvas *c, int x0, int y, int h, int stagger, int cap)
+{
+    for (int j = 0; j < h; j++) {
+        if (y + j < 0 || y + j >= c->h) continue;
+        for (int x = x0; x < x0 + STEP_W; x++) {
+            uint32_t col = C_STONE;
+            if (j == 0 || (x - x0 + stagger * STEP_W / 2) % STEP_W == 0) col = C_MORTAR;
+            else if (cap && j == 1) col = C_STONE_L;
+            c->px[(y + j) * c->w + x] = col;
+        }
+    }
+}
+
+int pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin)
 {
     const Stairs *s = &p->stairs;
     if (!s->n) return 0;
@@ -535,30 +556,45 @@ int pet_stairs(const Pet *p, Canvas *c, POINT *origin)
     c->h = H;
     cv_clear(c);
 
-    // Step i is a column of i + 1 staggered bricks.
     for (int i = 0; i < s->shown; i++) {
         int x0 = 1 + (s->dir > 0 ? i : s->n - 1 - i) * STEP_W, off = (int)floor(s->off[i]);
-        for (int r = 0; r <= i; r++) {
-            int top = H - (r + 1) * STEP_H + off;
-            for (int y = top < 0 ? 0 : top; y < top + STEP_H && y < H; y++)
-                for (int x = x0; x < x0 + STEP_W; x++) {
-                    uint32_t col = C_STONE;
-                    if (y == top || (x - x0 + (r % 2) * STEP_W / 2) % STEP_W == 0) col = C_MORTAR;
-                    else if (r == i && y == top + 1) col = C_STONE_L;
-                    c->px[y * W + x] = col;
-                }
+        int top = H - (i + 1) * STEP_H + off;
+        switch (style) {
+        case STAIRS_SOLID:   // a column of i + 1 staggered bricks
+            for (int r = 0; r <= i; r++)
+                stairs_bricks(c, x0, H - (r + 1) * STEP_H + off, STEP_H, r % 2, r == i);
+            break;
+        case STAIRS_OUTLINE: {   // tread, riser on the near side, back wall behind the top step
+            int front = s->dir > 0 ? x0 : x0 + STEP_W - 1, back = s->dir > 0 ? x0 + STEP_W - 1 : x0;
+            stairs_fill(c, x0, top, x0 + STEP_W, top + 1, C_STONE_L);
+            stairs_fill(c, front, top, front + 1, top + STEP_H + 1, C_STONE_L);
+            if (i == s->n - 1) stairs_fill(c, back, top, back + 1, H, C_STONE_L);
+            break;
+        }
+        default:             // a thin floating slab
+            stairs_bricks(c, x0, top, 4, i % 2, 1);
+            break;
         }
     }
-    // Dark outline wherever stone meets air (the bottom edge continues
-    // under the taskbar).
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) {
-            uint32_t *px = &c->px[y * W + x];
-            if (!*px) continue;
-            int air = y == 0 || x == 0 || x == W - 1 || !px[-W] || !px[-1] || !px[1] ||
-                      (y < H - 1 && !px[W]);
-            if (air) *px = C_OUTLINE;
-        }
+
+    if (style == STAIRS_OUTLINE) {
+        // A dark shadow under the lines keeps them visible on light backgrounds.
+        for (int y = H - 2; y >= 0; y--)
+            for (int x = 0; x < W; x++)
+                if (c->px[y * W + x] == C_STONE_L && !c->px[(y + 1) * W + x])
+                    c->px[(y + 1) * W + x] = C_OUTLINE;
+    } else {
+        // Dark outline wherever stone meets air (the bottom edge continues
+        // under the taskbar).
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                uint32_t *px = &c->px[y * W + x];
+                if (!*px) continue;
+                int air = y == 0 || x == 0 || x == W - 1 || !px[-W] || !px[-1] || !px[1] ||
+                          (y < H - 1 && !px[W]);
+                if (air) *px = C_OUTLINE;
+            }
+    }
 
     origin->x = (LONG)floor(s->x0 + 0.5) - (s->dir > 0 ? 1 : s->n * STEP_W + 1) * k;
     origin->y = (LONG)floor(s->base + 0.5) - H * k;
@@ -761,6 +797,10 @@ void pet_update(Pet *p, const World *w)
         }
         p->vy += 1.0 * u;
         if (p->vy > 40 * u) p->vy = 40 * u;
+        if (p->thrown) {   // air drag, stronger the faster it goes
+            double drag = 0.03 + 0.004 * fabs(p->vx) / u;
+            p->vx *= 1 - (drag > 0.15 ? 0.15 : drag);
+        }
         p->x += p->vx;
         p->y += p->vy;
         clamp_walls(p, 0.6);
@@ -775,13 +815,14 @@ void pet_update(Pet *p, const World *w)
             int hard = p->vy > 20 * u;
             p->y = gy;
             p->vy = 0;
+            p->thrown = 0;
             set_state(p, ST_LAND, hard ? 10 : 5);
             q = pose_land(hard);
         }
         break;
 
     case ST_LAND:
-        p->vx *= 0.8;
+        p->vx *= 0.65;
         p->x += p->vx;
         clamp_walls(p, 0);
         q = pose_land(p->dur > 5);

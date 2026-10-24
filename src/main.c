@@ -26,6 +26,7 @@ enum {
     IDM_MOUSE_OFF, IDM_MOUSE_FOLLOW, IDM_MOUSE_SHY, IDM_TYPING, IDM_FULLSCREEN,
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
     IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER, IDM_CLIMB, IDM_FEAT_CLIMB,
+    IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -67,6 +68,7 @@ static UINT g_dpi = 96;
 static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscreen = 1, g_water = 0;
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
+static int g_stair_style = STAIRS_SLAB;
 
 // runtime
 static World g_world;
@@ -189,7 +191,7 @@ static void present_stairs(PetWin *pw)
 {
     Canvas cv = { pw->st_px, 0, 0 };
     POINT pos;
-    if (!pet_stairs(&pw->pet, &cv, &pos)) {
+    if (!pet_stairs(&pw->pet, g_stair_style, &cv, &pos)) {
         stairs_destroy(pw);
         return;
     }
@@ -630,6 +632,13 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
     AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"大小");
+    if (g_feat_climb) {
+        HMENU st = CreatePopupMenu();
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SLAB), IDM_STAIRS_SLAB, L"悬空石板");
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_SOLID), IDM_STAIRS_SOLID, L"实心石砖");
+        AppendMenuW(st, MF_STRING | CHECK(g_stair_style == STAIRS_OUTLINE), IDM_STAIRS_OUTLINE, L"只有轮廓线");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)st, L"楼梯样式");
+    }
     AppendMenuW(m, MF_POPUP, (UINT_PTR)feat, L"功能开关");
     AppendMenuW(m, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
     AppendMenuW(m, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
@@ -657,6 +666,12 @@ static void show_menu(PetWin *pw)
     case IDM_CLIMB:
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_climb(&g_pets[i]->pet);
+        break;
+    case IDM_STAIRS_SLAB:
+    case IDM_STAIRS_SOLID:
+    case IDM_STAIRS_OUTLINE:
+        g_stair_style = cmd - IDM_STAIRS_SLAB;
+        reg_set_dword(L"StairStyle", (DWORD)g_stair_style);
         break;
     case IDM_FEAT_CLIMB:
         g_feat_climb = !g_feat_climb;
@@ -903,6 +918,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
     g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
+    g_stair_style = clampi((int)reg_get_dword(L"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);
     g_pomo_focus = (int)reg_get_dword(L"PomoFocus", 25);
     if (g_pomo_focus < FOCUS_LO || g_pomo_focus > FOCUS_HI || g_pomo_focus % FOCUS_STEP) g_pomo_focus = 25;
     g_pomo_break = clampi((int)reg_get_dword(L"PomoBreak", 5), BREAK_LO, BREAK_HI, 5);
