@@ -318,7 +318,7 @@ static void draw(POINT *pos)
     SetTextAlign(dc, TA_BASELINE | TA_LEFT);
     text(dc, "换装", 15, FW_BOLD, COL_INK, S(PV_X0) + D(2), S(21), 0);
     for (int s = 0; s < SLOTS; s++)
-        text(dc, slot_name(s), 13, FW_SEMIBOLD, COL_INK, S(LABEL_X), S(TOP + s * ROW_H) + S(CELL_H) / 2, 0);
+        text(dc, acc_slot_name(s), 13, FW_SEMIBOLD, COL_INK, S(LABEL_X), S(TOP + s * ROW_H) + S(CELL_H) / 2, 0);
     for (int a = 1; a < ACC_COUNT; a++) {
         RECT r;
         cell_rect(a, &r);

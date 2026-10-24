@@ -280,7 +280,7 @@ static NSRect button_rect(int which)
 
     draw_text(@"换装", 15, NSFontWeightBold, COL_INK, PV_X0 + 2, 21, NO);
     for (int s = 0; s < SLOTS; s++)
-        draw_text(@(slot_name(s)), 13, NSFontWeightSemibold, COL_INK, LABEL_X, TOP + s * ROW_H + CELL_H / 2, NO);
+        draw_text(@(acc_slot_name(s)), 13, NSFontWeightSemibold, COL_INK, LABEL_X, TOP + s * ROW_H + CELL_H / 2, NO);
 
     for (int a = 1; a < ACC_COUNT; a++) {
         NSRect r = cell_rect(a);

@@ -53,7 +53,7 @@ void draw_clawd(Canvas *c, int ox, int oy, const Pose *p);
 void draw_outfit(Canvas *c, int ox, int oy, const Pose *p);
 int  acc_slot(int a);
 const char *acc_name(int a);     // UTF-8
-const char *slot_name(int s);    // UTF-8
+const char *acc_slot_name(int s);    // UTF-8
 int  acc_above(const unsigned char *wear);   // rows the hat adds above the head
 // Dresses at random: each slot has its own chance of getting something.
 void outfit_roll(unsigned char *wear, unsigned *rng);

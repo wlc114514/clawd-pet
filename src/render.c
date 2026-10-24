@@ -236,7 +236,7 @@ const char *acc_name(int a)
     return a > ACC_NONE && a < ACC_COUNT ? ACCS[a].name : "";
 }
 
-const char *slot_name(int s)
+const char *acc_slot_name(int s)
 {
     static const char *const N[SLOTS] = { "头", "脸", "嘴", "脖子", "手" };
     return N[s];
