@@ -8,6 +8,7 @@
 #include <string.h>
 #include "pet.h"
 #include "bubble.h"
+#include "picker.h"
 
 #define WM_TRAY    (WM_APP + 1)
 #define TICK_MS    33
@@ -17,8 +18,6 @@
 #define REG_KEY    L"Software\\ClawdPet"
 #define RUN_KEY    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 
-#define POMO_FOCUS_MS  (25 * 60 * 1000)
-#define POMO_BREAK_MS  (5 * 60 * 1000)
 #define CC_WORK_MS     (3 * 60 * 1000)    // no event for this long: assume Claude stopped
 #define CC_WAIT_MS     (10 * 60 * 1000)
 
@@ -26,7 +25,7 @@ enum {
     IDM_PAUSE = 100, IDM_SLEEP, IDM_SIZE_S, IDM_SIZE_M, IDM_SIZE_L, IDM_AUTOSTART, IDM_EXIT,
     IDM_MOUSE_OFF, IDM_MOUSE_FOLLOW, IDM_MOUSE_SHY, IDM_TYPING, IDM_FULLSCREEN,
     IDM_POMO_START, IDM_POMO_STOP, IDM_WATER_OFF, IDM_WATER_30, IDM_WATER_45, IDM_WATER_60,
-    IDM_ADD_PET, IDM_REMOVE_PET,
+    IDM_ADD_PET, IDM_REMOVE_PET, IDM_FEAT_POMO, IDM_FEAT_WATER,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -58,6 +57,8 @@ static UINT g_dpi = 96;
 
 // settings (persisted)
 static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscreen = 1, g_water = 0;
+static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
+static int g_feat_pomo = 1, g_feat_water = 1;     // features shown in the menu
 
 // runtime
 static World g_world;
@@ -317,7 +318,8 @@ static int is_own_window(HWND h)
 {
     wchar_t cls[32];
     GetClassNameW(h, cls, 32);
-    return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS);
+    return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS) ||
+           !wcscmp(cls, L"ClawdPicker");
 }
 
 // Monitor covered by a fullscreen foreground window (game, video, slides), or NULL.
@@ -395,9 +397,12 @@ static void every_second(void)
 
     if (g_pomo && now >= g_pomo_end) {
         if (g_pomo == 1) {
+            wchar_t msg[64];
+            _snwprintf(msg, 64, L"专注 %d 分钟完成！\n起来休息 %d 分钟吧", g_pomo_focus, g_pomo_break);
+            msg[63] = 0;
             g_pomo = 2;
-            g_pomo_end = now + POMO_BREAK_MS;
-            announce(L"专注 25 分钟完成！\n起来休息 5 分钟吧", 60000, 1);
+            g_pomo_end = now + (ULONGLONG)g_pomo_break * 60000;
+            announce(msg, 60000, 1);
         } else {
             g_pomo = 0;
             announce(L"休息结束，继续加油！", 15000, 1);
@@ -405,7 +410,7 @@ static void every_second(void)
     }
 
     // Only remind someone who is actually at the computer.
-    if (g_water && now >= g_water_next && user_idle_ms() < 60000) {
+    if (g_feat_water && g_water && now >= g_water_next && user_idle_ms() < 60000) {
         g_water_next = now + (ULONGLONG)WATER_MIN[g_water] * 60000;
         announce(L"该喝水啦！", 15000, 1);
     }
@@ -494,13 +499,28 @@ static void set_size(int size)
     for (int i = 0; i < g_npets; i++) pet_set_scale(&g_pets[i]->pet, scale_for(size));
 }
 
+// Called by the picker's start button.
+static void pomo_start(int focus, int brk)
+{
+    wchar_t msg[64];
+    g_pomo_focus = focus;
+    g_pomo_break = brk;
+    reg_set_dword(L"PomoFocus", (DWORD)focus);
+    reg_set_dword(L"PomoBreak", (DWORD)brk);
+    g_pomo = 1;
+    g_pomo_end = GetTickCount64() + (ULONGLONG)focus * 60000;
+    _snwprintf(msg, 64, L"开始专注 %d 分钟！", focus);
+    msg[63] = 0;
+    announce(msg, 4000, 0);
+    update_tooltip();
+}
+
 #define CHECK(cond) ((cond) ? MF_CHECKED : 0)
 
 static void show_menu(PetWin *pw)
 {
     wchar_t st[64];
-    HMENU m = CreatePopupMenu(), sz = CreatePopupMenu(), mouse = CreatePopupMenu();
-    HMENU pomo = CreatePopupMenu(), water = CreatePopupMenu();
+    HMENU m = CreatePopupMenu(), sz = CreatePopupMenu(), mouse = CreatePopupMenu(), feat = CreatePopupMenu();
 
     AppendMenuW(sz, MF_STRING | CHECK(g_size == 0), IDM_SIZE_S, L"小");
     AppendMenuW(sz, MF_STRING | CHECK(g_size == 1), IDM_SIZE_M, L"中");
@@ -510,31 +530,37 @@ static void show_menu(PetWin *pw)
     AppendMenuW(mouse, MF_STRING | CHECK(g_mouse_mode == MOUSE_FOLLOW), IDM_MOUSE_FOLLOW, L"跟着鼠标走");
     AppendMenuW(mouse, MF_STRING | CHECK(g_mouse_mode == MOUSE_SHY), IDM_MOUSE_SHY, L"怕鼠标");
 
-    if (g_pomo) {
-        pomo_status(st, 64);
-        AppendMenuW(pomo, MF_STRING | MF_GRAYED, 0, st);
-        AppendMenuW(pomo, MF_STRING, IDM_POMO_STOP, L"停止");
-    } else {
-        AppendMenuW(pomo, MF_STRING, IDM_POMO_START, L"开始专注（25 分钟）");
-    }
-
-    AppendMenuW(water, MF_STRING | CHECK(g_water == 0), IDM_WATER_OFF, L"关闭");
-    AppendMenuW(water, MF_STRING | CHECK(g_water == 1), IDM_WATER_30, L"每 30 分钟");
-    AppendMenuW(water, MF_STRING | CHECK(g_water == 2), IDM_WATER_45, L"每 45 分钟");
-    AppendMenuW(water, MF_STRING | CHECK(g_water == 3), IDM_WATER_60, L"每 60 分钟");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_pomo), IDM_FEAT_POMO, L"番茄钟");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
 
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused;
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)mouse, L"鼠标互动");
     AppendMenuW(m, MF_STRING | CHECK(g_typing_on), IDM_TYPING, L"打字时陪你敲");
-    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)pomo, L"番茄钟");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)water, L"喝水提醒");
+    if (g_feat_pomo || g_feat_water) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    if (g_feat_pomo && g_pomo) {
+        HMENU pomo = CreatePopupMenu();
+        pomo_status(st, 64);
+        AppendMenuW(pomo, MF_STRING | MF_GRAYED, 0, st);
+        AppendMenuW(pomo, MF_STRING, IDM_POMO_STOP, L"停止");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)pomo, L"番茄钟");
+    } else if (g_feat_pomo) {
+        AppendMenuW(m, MF_STRING, IDM_POMO_START, L"番茄钟…");
+    }
+    if (g_feat_water) {
+        HMENU water = CreatePopupMenu();
+        AppendMenuW(water, MF_STRING | CHECK(g_water == 0), IDM_WATER_OFF, L"关闭");
+        AppendMenuW(water, MF_STRING | CHECK(g_water == 1), IDM_WATER_30, L"每 30 分钟");
+        AppendMenuW(water, MF_STRING | CHECK(g_water == 2), IDM_WATER_45, L"每 45 分钟");
+        AppendMenuW(water, MF_STRING | CHECK(g_water == 3), IDM_WATER_60, L"每 60 分钟");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)water, L"喝水提醒");
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
     AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)sz, L"大小");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)feat, L"功能开关");
     AppendMenuW(m, MF_STRING | CHECK(g_hide_fullscreen), IDM_FULLSCREEN, L"全屏时躲起来");
     AppendMenuW(m, MF_STRING | CHECK(autostart_enabled()), IDM_AUTOSTART, L"开机自启");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -568,13 +594,23 @@ static void show_menu(PetWin *pw)
         g_typing_on = !g_typing_on;
         reg_set_dword(L"Typing", (DWORD)g_typing_on);
         break;
-    case IDM_POMO_START:
-        g_pomo = 1;
-        g_pomo_end = now + POMO_FOCUS_MS;
-        announce(L"开始专注 25 分钟！", 4000, 0);
+    case IDM_POMO_START: {
+        const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
+        picker_open(pet_head(p), p->area, g_dpi, g_pomo_focus, g_pomo_break, pomo_start);
         break;
+    }
     case IDM_POMO_STOP:
         g_pomo = 0;
+        break;
+    case IDM_FEAT_POMO:
+        g_feat_pomo = !g_feat_pomo;
+        g_pomo = 0;
+        reg_set_dword(L"FeatPomo", (DWORD)g_feat_pomo);
+        break;
+    case IDM_FEAT_WATER:
+        g_feat_water = !g_feat_water;
+        g_water_next = now + (ULONGLONG)WATER_MIN[g_water] * 60000;
+        reg_set_dword(L"FeatWater", (DWORD)g_feat_water);
         break;
     case IDM_WATER_OFF:
     case IDM_WATER_30:
@@ -786,6 +822,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_hide_fullscreen = reg_get_dword(L"HideFullscreen", 1) != 0;
     g_water = clampi((int)reg_get_dword(L"Water", 0), 0, 3, 0);
     g_water_next = GetTickCount64() + (ULONGLONG)WATER_MIN[g_water] * 60000;
+    g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
+    g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
+    g_pomo_focus = (int)reg_get_dword(L"PomoFocus", 25);
+    if (g_pomo_focus < FOCUS_LO || g_pomo_focus > FOCUS_HI || g_pomo_focus % FOCUS_STEP) g_pomo_focus = 25;
+    g_pomo_break = clampi((int)reg_get_dword(L"PomoBreak", 5), BREAK_LO, BREAK_HI, 5);
     int count = clampi((int)reg_get_dword(L"Count", 1), 1, MAX_PETS, 1);
 
     HICON icon = LoadIconW(inst, MAKEINTRESOURCEW(1));
@@ -800,6 +841,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     wc.lpszClassName = HOST_CLASS;
     RegisterClassW(&wc);
     tb_register(inst);
+    picker_register(inst);
 
     // Hidden top-level window: owns the tray icon, timer and hook messages.
     g_host = CreateWindowExW(WS_EX_TOOLWINDOW, HOST_CLASS, L"Clawd", WS_POPUP, 0, 0, 0, 0, NULL, NULL, inst, NULL);
