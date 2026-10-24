@@ -448,6 +448,13 @@ static void tick(void)
                 SetWindowPos(pw->tb.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
+    // Everyone else jumps out of their skin when one drops through the taskbar.
+    for (int i = 0; i < g_npets; i++) {
+        if (!g_pets[i]->pet.dropped) continue;
+        g_pets[i]->pet.dropped = 0;
+        for (int j = 0; j < g_npets; j++)
+            if (j != i) pet_startle(&g_pets[j]->pet, g_pets[i]->pet.x);
+    }
     for (int i = g_npets - 1; i >= 0; i--)
         if (g_pets[i]->pet.gone) destroy_pet(i);
 }

@@ -8,6 +8,7 @@ enum {
     ST_WAVE,   // Claude Code needs the user
     ST_FLEE,   // running away from the cursor
     ST_LEAVE,  // being sent away: startled, then drops through the taskbar
+    ST_STARTLE,// cartoon leap backwards, freezing at the top
 };
 enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
@@ -38,6 +39,7 @@ typedef struct {
     int scale;
     int paused, forced_sleep, following;
     int gone;              // finished leaving; the window can be destroyed
+    int dropped;           // event: just fell through the taskbar (cleared by the caller)
     int tap_t, tap_side;
     int drag_dx, drag_dy;
     int zcount;
@@ -58,6 +60,7 @@ void pet_click(Pet *p);
 void pet_cheer(Pet *p);
 void pet_sleep(Pet *p);
 void pet_leave(Pet *p);
+void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x
 POINT pet_head(const Pet *p);   // screen point just above the head
 
 Pose pose_stand(void);

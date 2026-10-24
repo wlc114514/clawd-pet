@@ -196,6 +196,19 @@ static Pose pose_shock(int t)
     return q;
 }
 
+// Tom-style fright: stretched stiff, arms flung up, legs rigid, staring back
+// at whatever scared it.
+static Pose pose_startle(int look)
+{
+    Pose q = pose_stand();
+    q.eyes = EYE_WIDE;
+    q.squash = -1;
+    q.arm_l = q.arm_r = -4;
+    q.look = look;
+    for (int i = 0; i < 4; i++) q.legs[i] = 3;
+    return q;
+}
+
 static Pose pose_wave(int phase)
 {
     Pose q = pose_stand();
@@ -212,7 +225,7 @@ int pet_demo_poses(Pose *out, int max)
         pose_dangle(0), pose_air(1), pose_hop(1), pose_land(0),
         pose_sleep(0), pose_sleep(1), pose_stretch(),
         pose_type(0), pose_type(-1), pose_type(1), pose_wave(0), pose_wave(1),
-        pose_shock(0), pose_shock(8), pose_shock(14),
+        pose_shock(0), pose_shock(8), pose_shock(14), pose_startle(-1),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
@@ -321,6 +334,21 @@ void pet_leave(Pet *p)
     set_state(p, ST_LEAVE, 0);
 }
 
+void pet_startle(Pet *p, double from_x)
+{
+    int s = p->state;
+    if (!is_free(s) && s != ST_LAND && s != ST_SLEEP && s != ST_WAKE) return;
+    int dir = p->x >= from_x ? 1 : -1;   // leap away from it...
+    double u = unit(p);
+    p->forced_sleep = 0;
+    p->following = 0;
+    p->look = -dir;                      // ...while staring at it
+    p->vx = dir * 5 * u;
+    p->vy = -13 * u;
+    say(p, G_EXCL, C_EXCL);
+    set_state(p, ST_STARTLE, 6);         // dur = ticks frozen at the apex
+}
+
 void pet_update(Pet *p, const World *w)
 {
     double u = unit(p);
@@ -328,7 +356,8 @@ void pet_update(Pet *p, const World *w)
     double gy = ground_y(p);
 
     // Grounded states stick to the floor; if the floor moved away, fall.
-    if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP && p->state != ST_LEAVE) {
+    if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
+        p->state != ST_LEAVE && p->state != ST_STARTLE) {
         if (p->y < gy - 0.5) {
             p->vx = p->vy = 0;
             set_state(p, ST_FALL, 0);
@@ -494,6 +523,12 @@ void pet_update(Pet *p, const World *w)
 
     case ST_FALL:
     case ST_JUMP:
+    case ST_STARTLE:
+        if (p->state == ST_STARTLE && p->vy >= 0 && p->dur > 0) {
+            p->dur--;   // cartoon freeze at the top of the leap
+            q = pose_startle(p->look);
+            break;
+        }
         p->vy += 1.0 * u;
         if (p->vy > 40 * u) p->vy = 40 * u;
         p->x += p->vx;
@@ -503,7 +538,9 @@ void pet_update(Pet *p, const World *w)
             p->y = p->area.top - SPR_OY * p->scale;
             p->vy = fabs(p->vy) * 0.3;
         }
-        q = p->state == ST_JUMP ? pose_hop(p->vy < 0) : pose_air(p->vy < 0);
+        q = p->state == ST_JUMP    ? pose_hop(p->vy < 0)
+          : p->state == ST_STARTLE ? pose_startle(p->look)
+          : pose_air(p->vy < 0);
         if (p->y >= gy) {
             int hard = p->vy > 20 * u;
             p->y = gy;
@@ -554,6 +591,7 @@ void pet_update(Pet *p, const World *w)
             q = pose_shock(p->t);
         } else {
             // ...then the taskbar gives way and down it goes.
+            if (p->t == LEAVE_SHOCK_TICKS) p->dropped = 1;
             q = pose_dangle((p->t / 3) % 2);
             if (p->y > p->screen.bottom) p->gone = 1;
         }
