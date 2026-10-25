@@ -80,6 +80,70 @@ void draw_desk(Canvas *c, int ox, int oy, int prop, int frame)
     }
 }
 
+/*
+ * The cut-out: the sprite's outline (body, and arms resting on the desk)
+ * traced in dark crayon with rounded corners, coloured in with orange
+ * strokes that miss a spot here and there, dot eyes not quite level,
+ * leaning a little, with the white edge of the paper all round it and a
+ * bit of tape at the top.
+ */
+#define CRAYON_LINE  0xFF3B302Au
+#define CRAYON_LINE2 0xFF5E4C40u
+#define CRAYON_FILL  0xFFE3804Fu
+#define CRAYON_FILL2 0xFFF0A47Au
+#define PAPER_EDGE   0xFFFBF8F0u
+#define TAPE         0xFFE6DCC0u
+
+void draw_paper(Canvas *c, int ox, int oy)
+{
+    enum { W = 24, H = 14, M = 3 };   // the sprite, M px of margin all round
+    unsigned char m[H][W] = { 0 }, t[H][W] = { 0 };   // 1 colour, 2 line, 3 paper
+    for (int y = 0; y < 8; y++)
+        for (int x = 3; x <= 14; x++) m[y + M][x + M] = 1;
+    for (int y = 5; y <= 6; y++)
+        for (int x = 1; x <= 2; x++) m[y + M][x + M] = m[y + M][x + 14 + M] = 1;
+    for (int ring = 2; ring <= 3; ring++) {   // the line round it (side by side only: rounded corners), then the paper
+        for (int y = 1; y < H - 1; y++)
+            for (int x = 1; x < W - 1; x++) {
+                if (m[y][x]) continue;
+                int side = 0, any = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int v = m[y + dy][x + dx];
+                        if (v && v < ring) {
+                            any = 1;
+                            side |= !dx || !dy;
+                        }
+                    }
+                if (ring == 2 ? side : any) t[y][x] = (unsigned char)ring;
+            }
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (t[y][x]) m[y][x] = t[y][x];
+    }
+    for (int y = 0; y < H; y++)   // leaning: the top half one over to the right
+        for (int x = W - 1; x > 0; x--)
+            if (y < M + 4) m[y][x] = m[y][x - 1];
+
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint32_t col = 0;
+            switch (m[y][x]) {
+            case 1:
+                col = (x * 5 + y * 3) % 17 == 0 ? PAPER_EDGE   // missed a bit
+                    : (x + y) % 4 == 0           ? CRAYON_FILL2
+                                                 : CRAYON_FILL;
+                break;
+            case 2: col = (x + 2 * y) % 7 ? CRAYON_LINE : CRAYON_LINE2; break;
+            case 3: col = PAPER_EDGE; break;
+            }
+            if (col) put(c, ox - M + x, oy - M + y, col);
+        }
+    put(c, ox + 6, oy + 3, COL_EYE);   // the eyes, one a little higher
+    put(c, ox + 13, oy + 2, COL_EYE);
+    rect(c, ox + 9, oy - 2, ox + 11, oy - 1, TAPE);
+}
+
 void cv_clear(Canvas *c)
 {
     memset(c->px, 0, sizeof(uint32_t) * c->w * c->h);

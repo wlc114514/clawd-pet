@@ -66,6 +66,16 @@ static const int LEAVE_TICKS[LEAVE_KINDS] = {
 #define DESK_W      24
 #define SEAT_GAP    28
 
+// Desktop icons: ticks a hop up / down the zigzag stairs takes, and reaching
+// for the icon or putting it down, at normal speed; the most a whip can hurry
+// it along, and how much of the hurry is left after each tick.
+#define ZIG_HOP_UP   5
+#define ZIG_HOP_DOWN 3
+#define ICON_REACH   12
+#define WHIP_MAX     3.0
+#define WHIP_FADE    0.993
+enum { IC_WALK, IC_UP, IC_GRAB, IC_PUT, IC_DOWN, IC_SHOCK };   // Pet.icon_ph
+
 // The pet's solid box, in canvas columns: arm tip to arm tip. It runs from
 // the top of the head (SPR_OY) down to the feet (FOOT_Y).
 #define BOX_L (SPR_OX + 1)
@@ -205,6 +215,9 @@ static void refresh_area(Pet *p)
     POINT feet = { (LONG)p->x + CW * p->scale / 2, (LONG)p->y + FOOT_Y * p->scale - 1 };
     plat_screen_rects(feet, &p->area, &p->screen);
 }
+
+static void icon_drop(Pet *p);
+static void zig_crumble(Pet *p);
 
 static void set_state(Pet *p, int st, int dur)
 {
@@ -449,6 +462,14 @@ static Pose pose_walk(int phase, int dir)
     return q;
 }
 
+// Walking along with both arms up, holding something over its head.
+static Pose pose_carry(int phase, int dir)
+{
+    Pose q = pose_walk(phase, dir);
+    q.arm_l = q.arm_r = -4;
+    return q;
+}
+
 static Pose pose_dangle(int phase)
 {
     Pose q = pose_stand();
@@ -655,7 +676,7 @@ int pet_demo_poses(Pose *out, int max)
         pose_splat(1), pose_dazed(0),
         pose_desk(PROP_BOOK, 0), pose_desk(PROP_BOOK, 1), pose_desk(PROP_HOMEWORK, 0),
         pose_desk(PROP_HOMEWORK, 1), pose_desk(PROP_LAPTOP, 0), pose_desk(PROP_LAPTOP, 0),
-        pose_slide(1), pose_slide(-1),
+        pose_slide(1), pose_slide(-1), pose_carry(0, 1), pose_carry(1, -1),
     };
     all[1].eyes = EYE_CLOSED;
     all[2].look = -1;
@@ -725,8 +746,9 @@ void pet_dress(Pet *p, const unsigned char *wear)
 
 void pet_set_scale(Pet *p, int scale)
 {
-    if (p->state == ST_CLIMB) {   // the stairs were built for the old size
+    if (p->state == ST_CLIMB || p->state == ST_ICON) {   // the stairs were built for the old size
         stairs_crumble(p);
+        icon_drop(p);
         p->vx = p->vy = 0;
         set_state(p, ST_FALL, 0);
     }
@@ -747,6 +769,7 @@ void pet_begin_drag(Pet *p, POINT grab)
 {
     if (p->state == ST_LEAVE) return;   // no rescuing it mid-fall
     if (p->state == ST_CLIMB) stairs_crumble(p);
+    if (p->state == ST_ICON) icon_drop(p);   // and the icon stays where it is
     p->perch = 0;                       // let go and it lands on the taskbar
     p->bonked = 0;
     p->drag_dx = grab.x - (int)p->x;
@@ -812,6 +835,7 @@ static void sit_down(Pet *p)
     if (!p->desk && !p->desk_left) p->desk_job = rr(p, 0, 1) ? PROP_BOOK : PROP_HOMEWORK;   // back: as it was
     p->desk = 1;
     p->desk_left = 0;   // and if it couldn't get back to that one, it is gone
+    p->paper = 0;
     p->seat_x = mid_x(p);
     p->desk_y = feet_y(p);
     p->count = 0;
@@ -821,6 +845,10 @@ static void sit_down(Pet *p)
 void pet_click(Pet *p)
 {
     double u = unit(p);
+    if (p->state == ST_ICON) {   // caught at it (putting them back is all right)
+        if (p->job.kind == JOB_SCATTER) pet_caught(p);
+        return;
+    }
     if (p->desk && (p->state == ST_DESK || p->state == ST_SLEEP || p->state == ST_WAKE)) {
         if (p->state != ST_DESK) sit_down(p);
         p->count = 24;   // looks up, all smiles, and stays in its seat
@@ -876,15 +904,16 @@ void pet_cheer(Pet *p)
 
 void pet_sleep(Pet *p)
 {
-    if (p->state == ST_DRAG || p->state == ST_LEAVE || p->state == ST_CLIMB) return;
+    if (p->state == ST_DRAG || p->state == ST_LEAVE || p->state == ST_CLIMB || p->state == ST_ICON) return;
     p->forced_sleep = 1;
     set_state(p, ST_SLEEP, 0);
 }
 
 void pet_leave(Pet *p)
 {
-    if (p->state == ST_CLIMB) {   // react right where it is on the stairs
+    if (p->state == ST_CLIMB || p->state == ST_ICON) {   // react right where it is on the stairs
         stairs_crumble(p);
+        icon_drop(p);
         p->perch = p->area.bottom - (p->y + FOOT_Y * p->scale);
         if (p->perch < 0) p->perch = 0;
     }
@@ -968,18 +997,34 @@ static void stairs_fill(Canvas *c, int x0, int y0, int x1, int y1, uint32_t col)
         for (int x = x0 < 0 ? 0 : x0; x < x1 && x < c->w; x++) c->px[y * c->w + x] = col;
 }
 
-// A row of bricks h tall with its top at y; `cap` lights up the top surface.
-static void stairs_bricks(Canvas *c, int x0, int y, int h, int stagger, int cap)
+// A row of bricks w wide and h tall with its top-left at (x0, y); `cap`
+// lights up the top surface.
+static void stairs_bricks(Canvas *c, int x0, int w, int y, int h, int stagger, int cap)
 {
     for (int j = 0; j < h; j++) {
         if (y + j < 0 || y + j >= c->h) continue;
-        for (int x = x0; x < x0 + STEP_W; x++) {
+        for (int x = x0 < 0 ? 0 : x0; x < x0 + w && x < c->w; x++) {
             uint32_t col = C_STONE;
             if (j == 0 || (x - x0 + stagger * STEP_W / 2) % STEP_W == 0) col = C_MORTAR;
             else if (cap && j == 1) col = C_STONE_L;
             c->px[(y + j) * c->w + x] = col;
         }
     }
+}
+
+// Dark outline wherever stone meets air (the bottom edge continues under
+// the taskbar).
+static void stairs_outline(Canvas *c)
+{
+    int W = c->w, H = c->h;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint32_t *px = &c->px[y * W + x];
+            if (!*px) continue;
+            int air = y == 0 || x == 0 || x == W - 1 || !px[-W] || !px[-1] || !px[1] ||
+                      (y < H - 1 && !px[W]);
+            if (air) *px = C_OUTLINE;
+        }
 }
 
 // The desk it was carried away from, just as it stands under a pet sitting at it.
@@ -995,10 +1040,30 @@ static int left_desk(const Pet *p, Canvas *c, POINT *origin)
     return k;
 }
 
+int pet_desk(const Pet *p, Canvas *c, POINT *origin)
+{
+    if (!p->desk_left) return 0;
+    int k = p->scale;
+    c->w = CW;
+    c->h = CH;
+    cv_clear(c);
+    if (p->paper) draw_paper(c, SPR_OX, SPR_OY + DESK_DY);   // sitting up behind it, as the pet would
+    draw_desk(c, SPR_OX, SPR_OY, PROP_DESK, 0);
+    origin->x = (LONG)floor(p->seat_x + 0.5) - (SPR_OX + 9) * k;
+    origin->y = (LONG)floor(p->desk_y + 0.5) - FOOT_Y * k;
+    return k;
+}
+
 int pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin)
 {
+    if (!p->stairs.n) return p->desk_left ? left_desk(p, c, origin) : 0;
+    return pet_stairs(p, style, c, origin);
+}
+
+int pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin)
+{
     const Stairs *s = &p->stairs;
-    if (!s->n) return p->desk_left ? left_desk(p, c, origin) : 0;
+    if (!s->n) return 0;
     int W = s->n * STEP_W + 2, H = s->n * STEP_H + 1, k = s->scale;
     c->w = W;
     c->h = H;
@@ -1010,7 +1075,7 @@ int pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin)
         switch (style) {
         case STAIRS_SOLID:   // a column of i + 1 staggered bricks
             for (int r = 0; r <= i; r++)
-                stairs_bricks(c, x0, H - (r + 1) * STEP_H + off, STEP_H, r % 2, r == i);
+                stairs_bricks(c, x0, STEP_W, H - (r + 1) * STEP_H + off, STEP_H, r % 2, r == i);
             break;
         case STAIRS_OUTLINE: {   // tread, riser on the near side, back wall behind the top step
             int front = s->dir > 0 ? x0 : x0 + STEP_W - 1, back = s->dir > 0 ? x0 + STEP_W - 1 : x0;
@@ -1020,7 +1085,7 @@ int pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin)
             break;
         }
         default:             // a thin floating slab
-            stairs_bricks(c, x0, top, 4, i % 2, 1);
+            stairs_bricks(c, x0, STEP_W, top, 4, i % 2, 1);
             break;
         }
     }
@@ -1032,21 +1097,409 @@ int pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin)
                 if (c->px[y * W + x] == C_STONE_L && !c->px[(y + 1) * W + x])
                     c->px[(y + 1) * W + x] = C_OUTLINE;
     } else {
-        // Dark outline wherever stone meets air (the bottom edge continues
-        // under the taskbar).
-        for (int y = 0; y < H; y++)
-            for (int x = 0; x < W; x++) {
-                uint32_t *px = &c->px[y * W + x];
-                if (!*px) continue;
-                int air = y == 0 || x == 0 || x == W - 1 || !px[-W] || !px[-1] || !px[1] ||
-                          (y < H - 1 && !px[W]);
-                if (air) *px = C_OUTLINE;
-            }
+        stairs_outline(c);
     }
 
     origin->x = (LONG)floor(s->x0 + 0.5) - (s->dir > 0 ? 1 : s->n * STEP_W + 1) * k;
     origin->y = (LONG)floor(s->base + 0.5) - H * k;
     return k;
+}
+
+/* ---- zigzag stairs ---------------------------------------------------- */
+
+static int zig_slab(Zig *z, int l, int r, int top)
+{
+    z->l[z->n] = (short)l;
+    z->r[z->n] = (short)r;
+    z->top[z->n] = (short)top;
+    return z->n++;
+}
+
+static void zig_stop(Zig *z, int x, int y, int on)
+{
+    z->sx[z->nstops] = (short)x;
+    z->sy[z->nstops] = (short)y;
+    z->on[z->nstops++] = (short)on;
+}
+
+/*
+ * Lays out stairs from the floor up to where the pet is to stand: the middle
+ * of its feet at screen (mx, fy), facing `face`. Flights go back and forth,
+ * the last one towards `face`; whatever sticks out further that way (a
+ * landing below) is stepped over by a bridge at the top, so nothing is in
+ * front of the pet up there. 0 if it would not all fit on the screen.
+ */
+static int zig_plan(const Pet *p, Zig *z, double mx, double fy, int face)
+{
+    int k = p->scale;
+    memset(z, 0, sizeof *z);
+    z->scale = k;
+    z->crumble_t = -1;
+    z->ay = p->area.bottom;
+    int steps = (int)floor((z->ay - fy) / k / STEP_H + 0.5);
+    if (steps < 0) steps = 0;
+    if (steps > ZIG_SLABS) return 0;
+    int flights = (steps + ZIG_FLIGHT - 1) / ZIG_FLIGHT;
+    int d = flights % 2 ? face : -face, x = 0, y = 0;
+    zig_stop(z, 0, 0, -1);
+    for (int f = 0; f < flights; f++) {
+        int n = f ? ZIG_FLIGHT : steps - (flights - 1) * ZIG_FLIGHT;
+        for (int j = 0; j < n; j++) {
+            x += d * STEP_W;
+            y -= STEP_H;
+            zig_stop(z, x, y, zig_slab(z, x - STEP_W / 2, x + STEP_W / 2, y));
+        }
+        if (f < flights - 1) {   // the last step runs on into a landing, a little past where it turns
+            int i = z->n - 1;
+            if (d > 0) z->r[i] = (short)(x + ZIG_TURN + 8);
+            else z->l[i] = (short)(x - ZIG_TURN - 8);
+            x += d * ZIG_TURN;
+            zig_stop(z, x, y, i);
+            d = -d;
+        }
+    }
+    int out = 0;   // how far anything reaches past the top step towards `face`
+    for (int i = 0; i < z->n; i++) {
+        int o = face > 0 ? z->r[i] - x : x - z->l[i];
+        if (o > out) out = o;
+    }
+    if (out > STEP_W / 2) {
+        int i = z->n - 1, end = x + face * (out + 3);
+        if (face > 0) z->r[i] = (short)(end + 6);
+        else z->l[i] = (short)(end - 6);
+        x = end;
+        zig_stop(z, x, y, i);
+    }
+    z->ax = (int)floor(mx - x * k + 0.5);   // the top stop where it was asked for
+
+    for (int i = 0; i < z->n; i++)
+        if (z->ax + z->l[i] * k < p->area.left + k || z->ax + z->r[i] * k > p->area.right - k) return 0;
+    for (int i = 0; i < z->nstops; i++) {
+        double m = z->ax + z->sx[i] * k;
+        if (m - 9 * k < p->area.left || m + 9 * k > p->area.right) return 0;
+    }
+    return 1;
+}
+
+static double stop_x(const Pet *p, int i) { return p->zig.ax + p->zig.sx[i] * p->zig.scale; }
+static double stop_y(const Pet *p, int i) { return p->zig.ay + p->zig.sy[i] * p->zig.scale; }
+
+// Stairs up beside an icon whose picture's top-left is at pt, from the side
+// with more room (or else the other). The pet will face it: *face.
+static int zig_to(const Pet *p, Zig *z, POINT pt, int size, int *face)
+{
+    double cx = pt.x + size / 2.0, fy = pt.y + size, gap = size / 2.0 + 9 * p->scale;
+    int first = cx < (p->area.left + p->area.right) / 2.0 ? -1 : 1;
+    for (int i = 0; i < 2; i++) {
+        int f = i ? -first : first;
+        if (zig_plan(p, z, cx - f * gap, fy, f)) {
+            *face = f;
+            return 1;
+        }
+    }
+    z->n = z->nstops = 0;
+    return 0;
+}
+
+static void zig_crumble(Pet *p)
+{
+    Zig *z = &p->zig;
+    if (!z->n) z->nstops = 0;
+    else if (z->crumble_t < 0) z->crumble_t = 0;
+}
+
+// Slabs pop up a little way from below; crumbling, they fall from the top
+// down, two a tick, and are gone through the floor.
+static void zig_update(Pet *p)
+{
+    Zig *z = &p->zig;
+    if (!z->n) return;
+    int gone = 0;
+    for (int i = 0; i < z->shown; i++) {
+        if (z->crumble_t >= 0 && z->crumble_t * 2 >= z->shown - 1 - i) {
+            z->vy[i] += 0.4;
+            z->off[i] += z->vy[i];
+        } else if (z->off[i] > 0) {
+            z->off[i] -= 1.5;
+            if (z->off[i] < 0) z->off[i] = 0;
+        }
+        gone += z->top[i] + z->off[i] >= 0;
+    }
+    if (z->crumble_t >= 0 && ++z->crumble_t > 0 && gone == z->shown) z->n = z->nstops = 0;
+}
+
+static void zig_box(const Zig *z, int *lo, int *hi, int *top)
+{
+    *lo = z->l[0];
+    *hi = z->r[0];
+    *top = 0;
+    for (int i = 0; i < z->n; i++) {
+        if (z->l[i] < *lo) *lo = z->l[i];
+        if (z->r[i] > *hi) *hi = z->r[i];
+        if (z->top[i] < *top) *top = z->top[i];
+    }
+}
+
+int pet_zig_size(const Pet *p, int *w, int *h)
+{
+    int lo, hi, top;
+    if (!p->zig.n) return 0;
+    zig_box(&p->zig, &lo, &hi, &top);
+    *w = hi - lo + 2;   // a column of outline on each side
+    *h = 1 - top;       // a row above the highest; the floor is just below the bottom row
+    return 1;
+}
+
+int pet_zig(const Pet *p, Canvas *c, POINT *origin)
+{
+    const Zig *z = &p->zig;
+    int lo, hi, top, k = z->scale;
+    if (!pet_zig_size(p, &c->w, &c->h)) return 0;
+    zig_box(z, &lo, &hi, &top);
+    cv_clear(c);
+    for (int i = 0; i < z->shown; i++)   // thin floating slabs, as STAIRS_SLAB
+        stairs_bricks(c, z->l[i] - lo + 1, z->r[i] - z->l[i], z->top[i] + (int)floor(z->off[i]) - top + 1, 4, i % 2, 1);
+    stairs_outline(c);
+    origin->x = z->ax + (lo - 1) * k;
+    origin->y = z->ay + (top - 1) * k;
+    return k;
+}
+
+/* ---- desktop icons ---------------------------------------------------- */
+
+static Zig g_zig_plan;   // scratch: where the next stairs will go
+
+// Moves the pet one stop up (dir +1) or down (-1) its zigzag stairs: a hop
+// to the next step, or a walk along a landing. Returns 1 once it is there.
+static int zig_go(Pet *p, int dir, Pose *q)
+{
+    Zig *z = &p->zig;
+    int to = p->stop + dir;
+    double k = z->scale, tx = stop_x(p, to) - (SPR_OX + 9) * k, ty = stop_y(p, to) - FOOT_Y * k;
+    if (p->climb_ph == 0) {   // off: on the way up the slab after next starts coming up
+        p->hop_x = p->x;
+        p->hop_y = p->y;
+        p->hop_f = 0;
+        p->climb_ph = 1;
+        for (; dir > 0 && z->shown < z->n && z->shown <= z->on[to] + 1; z->shown++) z->off[z->shown] = 4;
+    }
+    int going = tx > p->x + 0.01 ? 1 : tx < p->x - 0.01 ? -1 : p->dir, there;
+    if (z->sy[to] != z->sy[p->stop]) {   // a hop
+        p->hop_f += p->hurry / (dir > 0 ? ZIG_HOP_UP : ZIG_HOP_DOWN);
+        double f = fmin(p->hop_f, 1);
+        p->x = p->hop_x + (tx - p->hop_x) * f;
+        p->y = p->hop_y + (ty - p->hop_y) * f - 12 * k * f * (1 - f);
+        *q = pose_hop(f < 0.5);
+        if (p->holding) q->arm_l = q->arm_r = -4;
+        there = f >= 1;
+    } else {                             // along a landing
+        double v = (dir > 0 ? 6.0 : 7.0) * unit(p) * p->hurry, d = tx - p->x;
+        p->x += fabs(d) < v ? d : going * v;
+        p->y = ty;
+        *q = p->holding ? pose_carry((p->t / 3) % 4, going) : pose_walk((p->t / 3) % 4, going);
+        p->t++;
+        there = fabs(tx - p->x) < 0.01;
+    }
+    q->look = p->dir = going;
+    if (!there) return 0;
+    p->stop = to;
+    p->climb_ph = 0;
+    return 1;
+}
+
+// Where the icon's picture goes when it is held up over the pet's head.
+static POINT overhead(const Pet *p)
+{
+    const Pose *q = &p->pose;
+    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0) - acc_above(p->wear);
+    POINT a = { (LONG)floor(mid_x(p) - p->job.size / 2.0 + 0.5),
+                (LONG)floor(p->y + (top - 1) * p->scale - p->job.size + 0.5) };
+    if (a.y < p->screen.top) a.y = p->screen.top;
+    return a;
+}
+
+// After the pose is settled: where the icon is now.
+static void icon_follow(Pet *p)
+{
+    if (p->state != ST_ICON || p->job.kind == JOB_NONE || p->job.status != JOB_ON) return;
+    POINT o = overhead(p);
+    if (p->icon_ph == IC_GRAB || p->icon_ph == IC_PUT) {   // lifted up in an arc, or down into place
+        POINT a = p->icon_ph == IC_GRAB ? p->job.from : o, b = p->icon_ph == IC_GRAB ? o : p->job.to;
+        double f = fmin(p->hop_f, 1), lift = 4 * p->scale * sin(f * 3.14159265);
+        p->job.at.x = (LONG)floor(a.x + (b.x - a.x) * f + 0.5);
+        p->job.at.y = (LONG)floor(a.y + (b.y - a.y) * f - lift + 0.5);
+    } else if (p->holding) {
+        p->job.at = o;
+    }
+}
+
+// Lets go of the job wherever it is: the icon stays put, the stairs come down.
+static void icon_drop(Pet *p)
+{
+    if (p->job.kind != JOB_NONE && p->job.status == JOB_ON) p->job.status = JOB_DROPPED;
+    p->holding = 0;
+    p->paper = 0;
+    zig_crumble(p);
+}
+
+static void icon_done(Pet *p, int status)
+{
+    if (p->job.status == JOB_ON) p->job.status = status;
+    p->holding = 0;
+    p->vx = p->vy = 0;
+    set_state(p, ST_IDLE, rr(p, 30, 90));
+}
+
+static Pose icon_update(Pet *p, int blinking)
+{
+    double k = p->scale, u = unit(p);
+    Pose q = pose_stand();
+    q.look = p->dir;
+    if (blinking) q.eyes = EYE_CLOSED;
+    p->hurry = 1 + (p->hurry - 1) * WHIP_FADE;
+    switch (p->icon_ph) {
+    case IC_WALK: {   // along the floor to the foot of the stairs
+        double d = p->goal_x - mid_x(p), v = (p->holding ? 4.4 : 5.0) * u * p->hurry;
+        p->y = p->area.bottom - FOOT_Y * k;
+        if (fabs(d) > 0.01) {
+            p->dir = d > 0 ? 1 : -1;
+            p->x += fabs(d) < v ? d : p->dir * v;
+            int period = v > 5.5 * u ? 2 : 3;
+            q = p->holding ? pose_carry((p->t / period) % 4, p->dir) : pose_walk((p->t / period) % 4, p->dir);
+            if (blinking) q.eyes = EYE_CLOSED;
+            p->t++;
+            break;
+        }
+        if (p->zig.n && p->zig.crumble_t >= 0) {   // the last stairs are still coming down
+            if (p->holding) q.arm_l = q.arm_r = -4;
+            break;
+        }
+        if (!p->zig.nstops && !zig_to(p, &p->zig, p->leg ? p->job.to : p->job.from, p->job.size, &p->face)) {
+            icon_done(p, JOB_DROPPED);   // no room any more (the screen changed?)
+            break;
+        }
+        p->stop = 0;
+        p->climb_ph = 0;
+        p->icon_ph = IC_UP;
+        break;
+    }
+
+    case IC_UP:
+        if (p->stop < p->zig.nstops - 1) {
+            zig_go(p, 1, &q);
+            break;
+        }
+        p->dir = p->face;
+        p->hop_f = 0;
+        p->icon_ph = p->leg ? IC_PUT : IC_GRAB;
+        break;
+
+    case IC_GRAB:
+    case IC_PUT:      // reaching out to the icon and up over its head, or back out and down
+        p->hop_f += p->hurry / ICON_REACH;
+        q.look = p->face;
+        q.eyes = EYE_HAPPY;
+        if (p->face > 0) q.arm_r = -3, q.arm_l = -1;
+        else q.arm_l = -3, q.arm_r = -1;
+        if (p->hop_f >= 1) {
+            if (p->icon_ph == IC_GRAB) {
+                p->holding = 1;
+            } else {
+                p->job.at = p->job.to;
+                p->holding = 0;
+                p->leg = 2;
+                say(p, G_HEART, C_HEART);
+            }
+            p->climb_ph = 0;
+            p->icon_ph = IC_DOWN;
+        }
+        break;
+
+    case IC_DOWN:
+        if (p->stop > 0) {
+            zig_go(p, -1, &q);
+            break;
+        }
+        zig_crumble(p);
+        if (p->leg == 2) {
+            icon_done(p, JOB_DONE);
+            break;
+        }
+        p->leg = 1;   // and off to where it goes
+        if (!zig_to(p, &g_zig_plan, p->job.to, p->job.size, &p->face)) {
+            icon_done(p, JOB_DROPPED);
+            break;
+        }
+        p->goal_x = g_zig_plan.ax + g_zig_plan.sx[0] * k;
+        p->icon_ph = IC_WALK;
+        q.arm_l = q.arm_r = -4;
+        break;
+
+    case IC_SHOCK:    // caught: frozen right where it is, as when sent away in shock
+        q = pose_shock(p->t);
+        if (p->t == 10) say(p, G_QUEST, C_WHITE);
+        if (++p->t >= LEAVE_TICKS[LEAVE_SHOCK]) {
+            zig_crumble(p);
+            p->vx = p->vy = 0;
+            if (feet_y(p) < p->area.bottom - 0.5) set_state(p, ST_FALL, 0);   // and down it comes with the stairs
+            else set_state(p, ST_IDLE, rr(p, 40, 90));
+        }
+        break;
+    }
+    return q;
+}
+
+int pet_fetch(Pet *p, const IconJob *j)
+{
+    int s = p->state, face;
+    if (!(is_free(s) || s == ST_DESK || s == ST_LAND) || p->paused || p->carrying || p->buddy ||
+        p->stairs.n || p->zig.n || p->perch || fabs(feet_y(p) - p->area.bottom) > 1)
+        return 0;   // busy, or not down on the floor
+    if (!zig_to(p, &g_zig_plan, j->to, j->size, &face) || !zig_to(p, &p->zig, j->from, j->size, &p->face))
+        return 0;
+    p->job = *j;
+    p->job.status = JOB_ON;
+    p->job.at = j->from;
+    if (p->desk) {   // focus mode: up from its desk, which waits for it (with a stand-in, if it is sneaking off)
+        p->desk = 0;
+        p->desk_left = 1;
+        p->seat = SEAT_AT;
+        p->paper = j->sneak;
+    }
+    p->leg = 0;
+    p->holding = 0;
+    p->hurry = 1;
+    p->goal_x = stop_x(p, 0);
+    p->vx = p->vy = 0;
+    p->following = 0;
+    p->forced_sleep = 0;
+    p->y = p->area.bottom - FOOT_Y * p->scale;
+    p->icon_ph = IC_WALK;
+    set_state(p, ST_ICON, 0);
+    return 1;
+}
+
+void pet_caught(Pet *p)
+{
+    int s = p->state;
+    p->paper = 0;   // the game is up
+    if (s == ST_ICON ? p->icon_ph == IC_SHOCK : !is_free(s) && s != ST_LAND && s != ST_TO_DESK) return;
+    if (s == ST_ICON && p->job.kind != JOB_NONE && p->job.status == JOB_ON) p->job.status = JOB_CAUGHT;
+    p->holding = 0;
+    p->vx = p->vy = 0;
+    p->following = 0;
+    p->forced_sleep = 0;
+    p->icon_ph = IC_SHOCK;
+    say(p, G_EXCL, C_EXCL);
+    set_state(p, ST_ICON, 0);
+}
+
+void pet_whip(Pet *p)
+{
+    if (p->state != ST_ICON || p->job.kind != JOB_RESTORE || p->job.status != JOB_ON) return;
+    p->hurry = fmin(p->hurry + 0.5, WHIP_MAX);
+    say(p, G_EXCL, C_EXCL);
+    spawn_drop(p);
 }
 
 // Ran into a wall on `side` (0: overhead). Starts ST_BUMP at tick t, so a
@@ -1073,10 +1526,11 @@ void pet_update(Pet *p, const World *w)
     refresh_area(p);
     sync_toast(w);
     stairs_update(p);
+    zig_update(p);
 
     // A popup coming up from under its feet lifts it up with it.
     if (g_has_toast && !airborne(p) && p->state != ST_DRAG && p->state != ST_LEAVE && p->state != ST_CLIMB &&
-        p->state != ST_BUMP && p->state != ST_RIDE && !(p->state == ST_TOAST && p->toast_ph == 1)) {
+        p->state != ST_BUMP && p->state != ST_RIDE && p->state != ST_ICON && !(p->state == ST_TOAST && p->toast_ph == 1)) {
         double k = p->scale;
         if (p->x + BOX_R * k > g_toast.left && p->x + BOX_L * k < g_toast.right &&
             feet_y(p) > g_toast.top + 0.5 && p->y + SPR_OY * k < g_toast.bottom)
@@ -1090,13 +1544,13 @@ void pet_update(Pet *p, const World *w)
             set_state(p, ST_WAKE, 40);
             p->t = 14;
         }
-        p->desk = p->desk_left = 0;
+        p->desk = p->desk_left = p->paper = 0;
     }
 
     // Grounded states stick to the floor; if the floor moved away, fall.
     if (p->state != ST_DRAG && p->state != ST_FALL && p->state != ST_JUMP &&
         p->state != ST_LEAVE && p->state != ST_STARTLE && p->state != ST_CLIMB && p->state != ST_BUMP &&
-        p->state != ST_RIDE && p->state != ST_FLIP && !(p->state == ST_TOAST && p->toast_ph == 1)) {
+        p->state != ST_RIDE && p->state != ST_FLIP && p->state != ST_ICON && !(p->state == ST_TOAST && p->toast_ph == 1)) {
         if (p->y < gy - 0.5) {   // walked off the end of a wall: keep going a little
             p->vx = p->state == ST_WALK || p->state == ST_FLEE ? p->dir * 1.5 * u
                   : p->state == ST_SLIDE ? p->vx : 0;
@@ -1453,6 +1907,10 @@ void pet_update(Pet *p, const World *w)
         p->t++;
         break;
     }
+
+    case ST_ICON:
+        q = icon_update(p, blinking);
+        break;
 
     case ST_WAVE:
         q = pose_wave((p->t / 6) % 2);
@@ -1880,6 +2338,7 @@ void pet_update(Pet *p, const World *w)
     memcpy(q.wear, p->wear, sizeof q.wear);
     q.tick = (int)p->age++;
     p->pose = q;
+    icon_follow(p);
 
     // The fan comes out when it's hot and the pet is staying in one place,
     // on the side facing the middle of the screen.
@@ -2525,7 +2984,7 @@ void pets_together(Pet **ps, int n, const World *w)
             for (int j = 0; j < n; j++) {
                 Pet *b = ps[j];
                 if (b == a || b->state == ST_DRAG || b->state == ST_LEAVE || b->state == ST_BUMP || b->state == ST_RIDE ||
-                    b->state == ST_CLIMB)
+                    b->state == ST_CLIMB || b->state == ST_ICON)
                     continue;
                 double ox = fmin(a->x + (SPR_OX + 15) * k, b->x + (SPR_OX + 15) * k) -
                             fmax(a->x + (SPR_OX + 3) * k, b->x + (SPR_OX + 3) * k);

@@ -16,6 +16,7 @@ enum {
     ST_TOAST,  // a popup came up: sliding over to it (toast_ph 0), then a leap up on top (1)
     ST_TO_DESK,// focus mode: walking over to its seat (Pet.seat_x)
     ST_DESK,   // focus mode: sitting at a school desk, reading or writing (the typist: on a laptop)
+    ST_ICON,   // carrying a desktop icon somewhere else (Pet.job), up and down zigzag stairs (Pet.zig)
     // Doing something with another pet (Pet.buddy); see pets_together().
     ST_GREET,  // face to face, waving
     ST_CHAT,   // taking turns to say something in pixel emoji
@@ -93,6 +94,45 @@ typedef struct {
     int crumble_t;         // ticks since it started crumbling, -1 = standing
 } Stairs;
 
+/*
+ * Zigzag stairs, up to a desktop icon however high it is: flights of
+ * ZIG_FLIGHT steps (as steep as Stairs), each but the last ending on a
+ * landing it walks ZIG_TURN along before turning back the other way for the
+ * next flight. Slabs (a step, or a step and its landing) and stops are in
+ * logical pixels from the anchor: x along, y up from the floor (negative).
+ */
+#define ZIG_FLIGHT 6
+#define ZIG_TURN   36
+#define ZIG_SLABS  200
+#define ZIG_STOPS  (ZIG_SLABS * 2 + 2)
+
+typedef struct {
+    int n;                  // slabs, 0 = none
+    int shown;              // slabs that have come up so far
+    int scale;
+    int ax, ay;             // the anchor, screen px: ay is the floor
+    short l[ZIG_SLABS], r[ZIG_SLABS], top[ZIG_SLABS];
+    double off[ZIG_SLABS], vy[ZIG_SLABS];   // logical px below its place (coming up, or falling)
+    int crumble_t;          // ticks since it started crumbling, -1 = standing
+    // The way up: where the middle of the feet goes, stop by stop. Stop 0 is
+    // on the floor; on[] is the slab under each stop (-1: the floor).
+    int nstops;
+    short sx[ZIG_STOPS], sy[ZIG_STOPS], on[ZIG_STOPS];
+} Zig;
+
+// A desktop icon to carry somewhere else (only on Windows, which moves the
+// real icon to wherever `at` says). Positions are the top-left of the icon's
+// picture, which is size x size, in screen px.
+enum { JOB_NONE, JOB_SCATTER, JOB_RESTORE };   // IconJob.kind
+enum { JOB_ON, JOB_DONE, JOB_CAUGHT, JOB_DROPPED };   // IconJob.status: going, or how it ended
+typedef struct {
+    int kind, status;
+    int size;
+    POINT from, to;
+    POINT at;          // where the icon is right now
+    int sneak;         // keeping out of sight (it leaves a paper cut-out of itself at its desk)
+} IconJob;
+
 typedef struct {
     double x, y, vx, vy;   // window top-left, screen px; velocity in px/tick
     int state, t, dur;
@@ -129,6 +169,14 @@ typedef struct {
     int desk_left;          // picked up from its desk, which waits at seat_x (on the floor at desk_y) for it
     double desk_y;
     int toast_ph;           // ST_TOAST: 0 sliding over, 1 leaping up
+    IconJob job;            // ST_ICON
+    Zig zig;
+    int icon_ph, leg;       // ST_ICON: what it is doing (IC_*); 0 off to the icon, 1 taking it, 2 done
+    int stop, holding;      // the zig stop it is at; has the icon up over its head
+    int face;               // which way the icon is from the top of the stairs
+    double hop_f;           // how far along it is between two stops, 0..1
+    double hurry;           // 1 = normal speed; whipped along: up to WHIP_MAX
+    int paper;              // a paper cut-out of it is sitting at its desk while it is away
     unsigned age;           // ticks since pet_init
     int drag_dx, drag_dy;
     int zcount;
@@ -165,6 +213,23 @@ void pet_climb(Pet *p);
 // STAIRS_CH, and sets c->w, c->h and the screen position of the top-left
 // corner. Returns the scale to draw it at, 0 if there is nothing.
 int  pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin);
+// The same, split up for a shell that shows them in windows of their own:
+// only the stairs (c as for pet_backdrop); only the desk left behind, with
+// the paper cut-out if there is one (c must hold CW x CH).
+int  pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin);
+int  pet_desk(const Pet *p, Canvas *c, POINT *origin);
+// The zigzag stairs: how big a canvas they need (0 if there are none), then
+// drawn into c, which must be that size, as for pet_backdrop.
+int  pet_zig_size(const Pet *p, int *w, int *h);
+int  pet_zig(const Pet *p, Canvas *c, POINT *origin);
+
+// Desktop icons. Off to carry one as *j says; 0 if it can't now (busy, not
+// on the floor, no room for the stairs). How it went ends up in p->job.status.
+int  pet_fetch(Pet *p, const IconJob *j);
+// Seen moving icons around: jumps out of its skin, and leaves it (and the icon) right there.
+void pet_caught(Pet *p);
+// Restoring icons, it gets a crack of the whip: hurries for a while.
+void pet_whip(Pet *p);
 // The walls every pet collides with, as rectangles in screen pixels.
 void pet_set_walls(const RECT *walls, int n);
 POINT pet_head(const Pet *p);   // screen point just above the head

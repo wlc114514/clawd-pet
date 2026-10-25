@@ -16,6 +16,7 @@
 #include "update.h"
 #include "version.h"
 #include "wall.h"
+#include "icons.h"
 
 #define WM_TRAY    (WM_APP + 1)
 #define WM_UPDATE  (WM_APP + 2)   // from update.c: wParam UPD_*, lParam manual
@@ -38,6 +39,7 @@ enum {
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
     IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE,
+    IDM_FEAT_ICONS, IDM_ICONS_RESTORE, IDM_WHIP,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -46,6 +48,19 @@ static const wchar_t *CC_EVENTS[] = { L"prompt", L"tool", L"permission", L"stop"
 
 static const int SIZE_PX[3] = { 3, 4, 6 };   // logical pixel size at 96 dpi
 static const int WATER_MIN[4] = { 0, 30, 45, 60 };
+
+// A click-through layered window for something drawn apart from a pet
+// (its stairs, the desk it left), from a canvas that grows as needed.
+typedef struct {
+    HWND hwnd;
+    HDC dc;
+    HBITMAP dib;
+    uint32_t *bits;
+    int w, h, k;
+    POINT pos;
+    uint32_t *px, *prev;
+    int cap;
+} Layer;
 
 typedef struct {
     HWND hwnd;
@@ -57,17 +72,21 @@ typedef struct {
     int dib_k, dirty, hidden;
     POINT prev_pos;
     uint32_t px[CW * CH], prev_px[CW * CH];
-    // the stairs it is climbing, in a click-through window of their own
-    HWND st_hwnd;
-    HDC st_dc;
-    HBITMAP st_dib;
-    uint32_t *st_bits;
-    int st_w, st_h, st_k;
-    POINT st_pos;
-    uint32_t st_px[STAIRS_CW * STAIRS_CH], st_prev[STAIRS_CW * STAIRS_CH];
+    Layer st;   // the stairs it is climbing
+    Layer dk;   // focus mode: the desk it left (and a paper cut-out of itself sitting there)
+    Layer ic;   // a picture of the desktop icon it is carrying
     // while it is in the air: a bigger window just below it, there to the mouse but not
     // to the eye, so it is easier to catch
     HWND catch_hwnd;
+    // the desktop icon it is carrying (Pet.job)
+    int icon_h;                   // icons_grab(), -1 for none
+    wchar_t icon_name[ICON_NAME];
+    POINT icon_home, icon_at;     // where it was taken from; where the real one is now
+    uint32_t *icon_px;            // its picture, job.size square: that is what goes up and down
+                                  // the stairs, the real icon only moves once it is put down
+    int icon_put;                 // the real icon has been put down
+    int sneak;                    // keeping out of sight (caught if seen)
+    int low;                      // down on the desktop under every window, as while it has an icon
 } PetWin;
 
 static HINSTANCE g_inst;
@@ -85,6 +104,7 @@ static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features sh
 static int g_feat_update = 1;   // look for a new version now and then
 static int g_focus;              // focus mode: everyone sits quietly at a desk (not kept)
 static int g_focus_pomo;         // ...turned on by the pomodoro, which turns it off again
+static int g_feat_icons = 1;     // now and then they move desktop icons about
 static int g_stair_style = STAIRS_SLAB;
 
 // runtime
@@ -322,54 +342,105 @@ static void present(PetWin *pw)
     UpdateLayeredWindow(pw->hwnd, NULL, &pos, &sz, pw->memdc, &src, 0, &bf, ULW_ALPHA);
 }
 
-static void stairs_destroy(PetWin *pw)
+static void layer_destroy(Layer *l)
 {
-    if (!pw->st_hwnd) return;
-    DestroyWindow(pw->st_hwnd);
-    DeleteDC(pw->st_dc);
-    if (pw->st_dib) DeleteObject(pw->st_dib);
-    pw->st_hwnd = NULL;
-    pw->st_dc = NULL;
-    pw->st_dib = NULL;
+    if (!l->hwnd) return;
+    DestroyWindow(l->hwnd);
+    DeleteDC(l->dc);
+    if (l->dib) DeleteObject(l->dib);
+    l->hwnd = NULL;
+    l->dc = NULL;
+    l->dib = NULL;
 }
 
-static void present_stairs(PetWin *pw)
+// Room for n logical pixels to draw into.
+static uint32_t *layer_canvas(Layer *l, int n)
 {
-    Canvas cv = { pw->st_px, 0, 0 };
-    POINT pos;
-    int k = pet_backdrop(&pw->pet, g_stair_style, &cv, &pos), first = !pw->st_hwnd;
-    if (!k) {
-        stairs_destroy(pw);
-        return;
+    if (n > l->cap) {
+        free(l->px);
+        free(l->prev);
+        l->px = calloc((size_t)n, 4);
+        l->prev = calloc((size_t)n, 4);
+        l->cap = n;
+        l->w = 0;   // nothing to compare with
     }
-    if (first) {
-        pw->st_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
-                                      WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
-                                      NULL, NULL, g_inst, NULL);
-        pw->st_dc = CreateCompatibleDC(NULL);
-    }
-    if (first || cv.w != pw->st_w || cv.h != pw->st_h || k != pw->st_k) {
-        HBITMAP dib = make_dib(cv.w * k, cv.h * k, &pw->st_bits);
-        SelectObject(pw->st_dc, dib);
-        if (pw->st_dib) DeleteObject(pw->st_dib);
-        pw->st_dib = dib;
-        pw->st_w = cv.w;
-        pw->st_h = cv.h;
-        pw->st_k = k;
-    } else if (pos.x == pw->st_pos.x && pos.y == pw->st_pos.y &&
-               !memcmp(pw->st_px, pw->st_prev, sizeof(uint32_t) * cv.w * cv.h)) {
-        return;
-    }
-    pw->st_pos = pos;
-    memcpy(pw->st_prev, pw->st_px, sizeof(uint32_t) * cv.w * cv.h);
+    return l->px;
+}
 
-    cv_scale_premul(&cv, pw->st_bits, k);
-    SIZE sz = { cv.w * k, cv.h * k };
+// Shows cv (drawn into l->px) at pos, k screen px a logical one; k = 0
+// takes the window away. A new window goes just below `after`.
+static void layer_present(Layer *l, const Canvas *cv, int k, POINT pos, HWND after)
+{
+    if (!k) {
+        layer_destroy(l);
+        return;
+    }
+    int first = !l->hwnd;
+    if (first) {
+        l->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                                  WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
+                                  NULL, NULL, g_inst, NULL);
+        l->dc = CreateCompatibleDC(NULL);
+    }
+    if (first || cv->w != l->w || cv->h != l->h || k != l->k) {
+        HBITMAP dib = make_dib(cv->w * k, cv->h * k, &l->bits);
+        SelectObject(l->dc, dib);
+        if (l->dib) DeleteObject(l->dib);
+        l->dib = dib;
+        l->w = cv->w;
+        l->h = cv->h;
+        l->k = k;
+    } else if (pos.x == l->pos.x && pos.y == l->pos.y &&
+               !memcmp(l->px, l->prev, sizeof(uint32_t) * cv->w * cv->h)) {
+        return;
+    }
+    l->pos = pos;
+    memcpy(l->prev, l->px, sizeof(uint32_t) * cv->w * cv->h);
+
+    cv_scale_premul(cv, l->bits, k);
+    SIZE sz = { cv->w * k, cv->h * k };
     POINT src = { 0, 0 };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    UpdateLayeredWindow(pw->st_hwnd, NULL, &pos, &sz, pw->st_dc, &src, 0, &bf, ULW_ALPHA);
-    if (first)   // just below its pet
-        SetWindowPos(pw->st_hwnd, pw->hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    UpdateLayeredWindow(l->hwnd, NULL, &pos, &sz, l->dc, &src, 0, &bf, ULW_ALPHA);
+    if (first) SetWindowPos(l->hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+static void layers_destroy(PetWin *pw)
+{
+    layer_destroy(&pw->st);
+    layer_destroy(&pw->dk);
+    layer_destroy(&pw->ic);
+}
+
+// The picture of the icon is up in the air (not where the real one is).
+static int icon_carried(const PetWin *pw)
+{
+    const IconJob *j = &pw->pet.job;
+    return j->kind != JOB_NONE && j->status == JOB_ON && pw->icon_px && pw->pet.leg != 2 &&
+           (j->at.x != j->from.x || j->at.y != j->from.y);
+}
+
+// Its stairs (zigzag ones up to an icon, or the plain kind), and the desk it left.
+static void present_layers(PetWin *pw)
+{
+    Canvas cv;
+    POINT pos;
+    int k, w, h;
+    if (pet_zig_size(&pw->pet, &w, &h)) {
+        cv.px = layer_canvas(&pw->st, w * h);
+        k = pet_zig(&pw->pet, &cv, &pos);
+    } else {
+        cv.px = layer_canvas(&pw->st, STAIRS_CW * STAIRS_CH);
+        k = pet_stairs(&pw->pet, g_stair_style, &cv, &pos);
+    }
+    layer_present(&pw->st, &cv, k, pos, pw->hwnd);
+    cv.px = layer_canvas(&pw->dk, CW * CH);
+    k = pet_desk(&pw->pet, &cv, &pos);
+    layer_present(&pw->dk, &cv, k, pos, pw->low ? HWND_TOPMOST : pw->hwnd);   // the stand-in stays in view
+    int n = pw->pet.job.size;
+    cv = (Canvas){ layer_canvas(&pw->ic, n * n), n, n };
+    if (icon_carried(pw)) memcpy(cv.px, pw->icon_px, sizeof(uint32_t) * n * n);
+    layer_present(&pw->ic, &cv, icon_carried(pw), pw->pet.job.at, pw->hwnd);   // in its hands, in front of the stairs
 }
 
 static void present_catch(PetWin *pw)
@@ -425,6 +496,7 @@ static PetWin *spawn_pet(int drop_in)
     PetWin *pw = calloc(1, sizeof *pw);
     pet_init(&pw->pet, scale_for(g_size), GetTickCount() ^ ((unsigned)g_npets * 0x9E3779B9u));
     pw->pet.typist = !g_npets;   // only the first one types along
+    pw->icon_h = -1;
     if (drop_in) pw->pet.y = pw->pet.area.top - CH * pw->pet.scale;   // falls from the sky
     pw->prev_pos.x = pw->prev_pos.y = INT_MIN;
     pw->dirty = 1;
@@ -439,6 +511,8 @@ static PetWin *spawn_pet(int drop_in)
     g_pets[g_npets++] = pw;
     return pw;
 }
+
+static void job_end(PetWin *pw);
 
 // Pets that are not on their way out.
 static int active_pets(void)
@@ -464,8 +538,13 @@ static void destroy_pet(int idx)
 {
     PetWin *pw = g_pets[idx];
     if (g_press_pw == pw) g_press_pw = NULL;
+    if (pw->pet.job.kind != JOB_NONE) job_end(pw);
     tb_destroy(&pw->tb);
-    stairs_destroy(pw);
+    layers_destroy(pw);
+    free(pw->st.px);
+    free(pw->st.prev);
+    free(pw->dk.px);
+    free(pw->dk.prev);
     if (pw->catch_hwnd) DestroyWindow(pw->catch_hwnd);
     DestroyWindow(pw->hwnd);
     DeleteDC(pw->memdc);
@@ -663,6 +742,470 @@ static HMONITOR pet_monitor(const Pet *p)
     return MonitorFromPoint(c, MONITOR_DEFAULTTONEAREST);
 }
 
+/* ---- desktop icons ---------------------------------------------------- */
+
+/*
+ * Now and then the pets move a desktop icon somewhere else, one each, 1-3 of
+ * them at a time: while an app fills the screen, every 5-15 minutes, out of
+ * sight behind it (and caught if seen); or right in front of the user, who
+ * has been looking at the desktop for a minute or two (caught if clicked).
+ * Where each icon was is kept (icons.c), so they can all be put back.
+ */
+#define ICON_LIMIT   20                   // moved and not put back: no more after this
+#define SNEAK_MIN_MS (5 * 60 * 1000)
+#define SNEAK_MAX_MS (15 * 60 * 1000)
+#define DESK_MIN_MS  (60 * 1000)
+#define DESK_MAX_MS  (120 * 1000)
+#define MAX_QUEUE    64
+
+static ULONGLONG g_sneak_at;              // next time they sneak off to move some
+static ULONGLONG g_desk_since, g_desk_wait;   // looking at the desktop since; how long before they move some
+static int g_restoring, g_restorers;      // putting them all back; how many pets at once
+static MovedIcon g_queue[MAX_QUEUE];      // ...still to go
+static int g_nqueue;
+static int g_whip;                        // the whip is out (while restoring)
+static HCURSOR g_whip_cursor;
+
+static int rand_in(int lo, int hi)
+{
+    return lo + (int)(((unsigned)rand() << 15 ^ (unsigned)rand()) % (unsigned)(hi - lo + 1));
+}
+
+// Moving icons (or sneaking back to its desk), a pet is down on the desktop
+// with them, its stairs too: just above the icons, under every window.
+// Otherwise it is on top of everything.
+static void restack(PetWin *pw)
+{
+    UINT f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+    SetWindowPos(pw->hwnd, pw->low ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0, f);
+    if (pw->st.hwnd) SetWindowPos(pw->st.hwnd, pw->hwnd, 0, 0, 0, 0, f);
+    if (pw->ic.hwnd) SetWindowPos(pw->ic.hwnd, pw->hwnd, 0, 0, 0, 0, f);
+    if (pw->dk.hwnd) SetWindowPos(pw->dk.hwnd, pw->low ? HWND_TOPMOST : pw->hwnd, 0, 0, 0, 0, f);
+}
+
+static void set_sneak(PetWin *pw, int on)
+{
+    pw->sneak = on;
+}
+
+// Someone is carrying it right now.
+static int icon_busy(const wchar_t *name)
+{
+    for (int i = 0; i < g_npets; i++)
+        if (g_pets[i]->pet.job.kind != JOB_NONE && !wcscmp(g_pets[i]->icon_name, name)) return 1;
+    return 0;
+}
+
+static int jobs_of(int kind)
+{
+    int n = 0;
+    for (int i = 0; i < g_npets; i++) n += g_pets[i]->pet.job.kind == kind;
+    return n;
+}
+
+// A blank page with a folded corner, n x n: for an icon the shell has no picture of.
+static uint32_t *blank_picture(int n)
+{
+    uint32_t *px = calloc((size_t)n * n, 4);
+    int l = n / 6, r = n - n / 6, t = n / 12, b = n - n / 12, fold = n / 4;
+    for (int y = t; y < b; y++)
+        for (int x = l; x < r; x++) {
+            int c = x - (r - fold) - (y - t);   // > 0: cut off by the fold
+            if (c > 0) continue;
+            int edge = x == l || x == r - 1 || y == t || y == b - 1 || c == 0;
+            px[y * n + x] = edge ? 0xFF8A8A8Au : 0xFFF4F4F4u;
+        }
+    for (int y = t; y < t + fold; y++)   // the folded-over corner
+        for (int x = r - fold; x <= r - fold + (y - t); x++)
+            px[y * n + x] = x == r - fold || x == r - fold + (y - t) || y == t + fold - 1 ? 0xFF8A8A8Au : 0xFFDADADAu;
+    return px;
+}
+
+// Sends pw off with *j for the icon called name. 0 if it can't go.
+static int start_job(PetWin *pw, const IconJob *j, const wchar_t *name)
+{
+    int h = icons_grab(name);
+    if (h < 0) return 0;
+    if (!pet_fetch(&pw->pet, j)) {
+        icons_release(h);
+        return 0;
+    }
+    free(pw->icon_px);
+    pw->icon_px = icons_picture(name, j->size);
+    if (!pw->icon_px) pw->icon_px = blank_picture(j->size);
+    pw->icon_h = h;
+    pw->icon_put = 0;
+    wcsncpy(pw->icon_name, name, ICON_NAME - 1);
+    pw->icon_name[ICON_NAME - 1] = 0;
+    pw->icon_home = pw->icon_at = j->from;
+    if (j->sneak) set_sneak(pw, 1);
+    return 1;
+}
+
+// One icon on its screen, to an empty spot on the same screen.
+static int start_scatter(PetWin *pw, int sneak)
+{
+    enum { MAX_LIST = 1024, MAX_SPOTS = 512 };
+    const Pet *p = &pw->pet;
+    DeskIcon *icons = malloc(sizeof *icons * MAX_LIST);
+    POINT *spots = malloc(sizeof *spots * MAX_SPOTS);
+    int ni = icons_list(icons, MAX_LIST, &p->area), ns = icons_free_spots(spots, MAX_SPOTS, &p->area), ok = 0;
+    for (int i = 0; i < ni; i++)   // not one someone else has
+        if (icon_busy(icons[i].name)) icons[i--] = icons[--ni];
+    for (int i = 0; i < ns; i++)   // nor where someone else is taking one
+        for (int j = 0; j < g_npets; j++)
+            if (g_pets[j]->pet.job.kind != JOB_NONE && g_pets[j]->pet.job.to.x == spots[i].x &&
+                g_pets[j]->pet.job.to.y == spots[i].y) {
+                spots[i--] = spots[--ns];
+                break;
+            }
+    for (int t = 0; t < 8 && ni && ns && !ok; t++) {
+        int i = rand_in(0, ni - 1), s = rand_in(0, ns - 1);
+        IconJob j = { JOB_SCATTER, JOB_ON, icons_size(), icons[i].pt, spots[s], icons[i].pt, sneak };
+        ok = start_job(pw, &j, icons[i].name);
+    }
+    free(icons);
+    free(spots);
+    return ok;
+}
+
+// 1-3 of those free on monitor m (NULL: any) go and move an icon each.
+static void scatter(HMONITOR m, int sneak)
+{
+    if (!g_feat_icons || g_restoring || !icons_ready()) return;
+    int room = ICON_LIMIT - moved_check(icon_busy) - jobs_of(JOB_SCATTER);
+    HMONITOR fs = fullscreen_monitor();
+    PetWin *can[MAX_PETS];
+    int n = 0;
+    for (int i = 0; i < g_npets; i++) {
+        PetWin *pw = g_pets[i];
+        HMONITOR pm = pet_monitor(&pw->pet);
+        if (pw->hidden || pw->pet.job.kind != JOB_NONE || pw->pet.state == ST_LEAVE || (m && pm != m) || pm == fs)
+            continue;
+        can[n++] = pw;
+    }
+    for (int i = n - 1; i > 0; i--) {   // in no particular order
+        int j = rand_in(0, i);
+        PetWin *t = can[i];
+        can[i] = can[j];
+        can[j] = t;
+    }
+    for (int i = 0, want = rand_in(1, 3); i < n && want > 0 && room > 0; i++)
+        if (start_scatter(can[i], sneak)) {
+            want--;
+            room--;
+        }
+}
+
+static void restore_start(void)
+{
+    moved_check(icon_busy);
+    MovedIcon *m = malloc(sizeof *m * MAX_QUEUE);
+    int n = moved_load(m, MAX_QUEUE);
+    g_nqueue = 0;
+    for (int i = 0; i < n; i++)
+        if (!icon_busy(m[i].name)) g_queue[g_nqueue++] = m[i];
+    free(m);
+    if (!g_nqueue) return;
+    g_restoring = 1;
+    g_restorers = rand_in(1, 3);
+    announce(L"好啦好啦，这就搬回去……", 4000, 0);
+}
+
+// Hands the next icon to be put back to a free pet on its screen.
+static void restore_next(void)
+{
+    int busy = jobs_of(JOB_RESTORE);
+    if (!g_nqueue && !busy) {
+        g_restoring = g_whip = 0;
+        announce(L"桌面图标都放回去啦", 4000, 0);
+        return;
+    }
+    if (!g_nqueue || busy >= g_restorers) return;
+    MovedIcon *it = &g_queue[g_nqueue - 1];
+    POINT now;
+    if (!icons_find(it->name, &now) || now.x != it->now.x || now.y != it->now.y) {   // gone, or the user moved it
+        moved_forget(it->name);
+        g_nqueue--;
+        return;
+    }
+    int someone = 0;   // a pet on that screen at all
+    for (int i = 0; i < g_npets; i++) {
+        PetWin *pw = g_pets[i];
+        const RECT *a = &pw->pet.area;
+        if (pw->pet.state == ST_LEAVE || now.x < a->left || now.x >= a->right || it->home.x < a->left ||
+            it->home.x >= a->right)
+            continue;
+        someone = 1;
+        IconJob j = { JOB_RESTORE, JOB_ON, icons_size(), now, it->home, now, 0 };
+        if (!pw->hidden && pw->pet.job.kind == JOB_NONE && start_job(pw, &j, it->name)) {
+            g_nqueue--;
+            return;
+        }
+    }
+    if (!someone) g_nqueue--;   // nobody over there to take it: it stays on the list for later
+}
+
+// The real icon goes to `at`, or rather the empty grid spot nearest it
+// (Explorer would only snap it onto the grid, maybe on top of another one).
+static void icon_land(PetWin *pw, POINT at)
+{
+    enum { MAX_SPOTS = 512 };
+    Pet *p = &pw->pet;
+    POINT *spots = malloc(sizeof *spots * MAX_SPOTS), best = pw->icon_at;
+    int ns = spots ? icons_free_spots(spots, MAX_SPOTS, &p->area) : 0;
+    double bd = hypot(at.x - best.x, at.y - best.y);   // where it is now counts as free
+    for (int i = 0; i < ns; i++) {
+        int taken = 0;   // not where someone else is taking one
+        for (int j = 0; j < g_npets; j++)
+            taken |= g_pets[j] != pw && g_pets[j]->pet.job.kind != JOB_NONE && g_pets[j]->pet.job.to.x == spots[i].x &&
+                     g_pets[j]->pet.job.to.y == spots[i].y;
+        double d = hypot(at.x - spots[i].x, at.y - spots[i].y);
+        if (!taken && d < bd) {
+            bd = d;
+            best = spots[i];
+        }
+    }
+    free(spots);
+    if (best.x == pw->icon_at.x && best.y == pw->icon_at.y) return;
+    icons_move(pw->icon_h, best);
+    pw->icon_at = best;
+}
+
+// No other icon at pt: one put down on top of another has Explorer push a
+// whole run of them along the grid, so that is never done.
+static int spot_clear(PetWin *pw, POINT pt)
+{
+    enum { MAX_BY = 16 };
+    DeskIcon by[MAX_BY];
+    int size = pw->pet.job.size;
+    RECT r = { pt.x - size / 2, pt.y - size / 2, pt.x + size * 3 / 2, pt.y + size * 3 / 2 };
+    int n = icons_list(by, MAX_BY, &r);
+    for (int i = 0; i < n; i++)
+        if (wcscmp(by[i].name, pw->icon_name)) return 0;
+    return 1;
+}
+
+// Put down where it was going (if someone has put another icon there since:
+// the empty spot nearest it). Once.
+static void icon_put(PetWin *pw)
+{
+    POINT to = pw->pet.job.to;
+    if (pw->icon_put) return;
+    pw->icon_put = 1;
+    if (!spot_clear(pw, to)) {
+        icon_land(pw, to);
+    } else if (pw->icon_at.x != to.x || pw->icon_at.y != to.y) {
+        icons_move(pw->icon_h, to);
+        pw->icon_at = to;
+    }
+}
+
+// The job is over, one way or another: the real icon goes where its picture
+// got to, and we keep track of where that is.
+static void job_end(PetWin *pw)
+{
+    Pet *p = &pw->pet;
+    if (p->job.status == JOB_DONE || p->leg == 2)
+        icon_put(pw);
+    else if (p->job.at.x != p->job.from.x || p->job.at.y != p->job.from.y) {
+        icon_land(pw, p->job.at);   // dropped where it was caught
+    }
+    free(pw->icon_px);
+    pw->icon_px = NULL;
+    layer_destroy(&pw->ic);
+    moved_note(pw->icon_name, pw->icon_home, pw->icon_at);   // forgets it if it is back home
+    icons_release(pw->icon_h);
+    pw->icon_h = -1;
+    if (p->job.kind == JOB_RESTORE && p->job.status != JOB_DONE && g_restoring && g_nqueue < MAX_QUEUE) {
+        MovedIcon *it = &g_queue[g_nqueue++];   // someone will have to try again
+        wcscpy(it->name, pw->icon_name);
+        it->home = p->job.to;
+        it->now = pw->icon_at;
+    }
+    p->job.kind = JOB_NONE;
+}
+
+// Something of a sneaking pet the user could see right now: the pet itself
+// (nothing in front of it), or the icon it has (on the bare desktop).
+static int sneak_seen(PetWin *pw)
+{
+    const Pet *p = &pw->pet;
+    int k = p->scale;
+    POINT body[3] = {
+        { (LONG)p->x + (SPR_OX + 9) * k, (LONG)p->y + (SPR_OY + 4) * k },
+        { (LONG)p->x + (SPR_OX + 5) * k, (LONG)p->y + (SPR_OY + 3) * k },
+        { (LONG)p->x + (SPR_OX + 13) * k, (LONG)p->y + (SPR_OY + 3) * k },
+    };
+    for (int i = 0; i < 3; i++) {
+        HWND h = WindowFromPoint(body[i]);
+        if (h && GetAncestor(h, GA_ROOT) == pw->hwnd) return 1;
+    }
+    int up = icon_carried(pw);
+    if (up || (p->job.kind != JOB_NONE && (pw->icon_at.x != pw->icon_home.x || pw->icon_at.y != pw->icon_home.y))) {
+        POINT at = up ? p->job.at : pw->icon_at;   // the picture lets the mouse through, so this finds what is in front
+        POINT c = { at.x + p->job.size / 2, at.y + p->job.size / 2 };
+        HWND h = WindowFromPoint(c);
+        wchar_t cls[32] = L"";
+        if (h) GetClassNameW(GetAncestor(h, GA_ROOT), cls, 32);
+        if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) return 1;
+    }
+    return 0;
+}
+
+// Every tick: icons that have been put down go there; sneaks get caught.
+static void icons_tick(void)
+{
+    for (int i = 0; i < g_npets; i++) {
+        PetWin *pw = g_pets[i];
+        Pet *p = &pw->pet;
+        if (pw->hidden) continue;
+        if (p->job.kind != JOB_NONE) {
+            if (p->leg == 2) icon_put(pw);   // just put down: in one go, as its picture goes away
+            if (p->job.status != JOB_ON) job_end(pw);
+        }
+        if (pw->sneak && sneak_seen(pw)) {
+            pet_caught(p);
+            if (p->job.kind != JOB_NONE) job_end(pw);
+        }
+        if (pw->sneak && p->job.kind == JOB_NONE && !p->paper) set_sneak(pw, 0);   // done (or caught)
+        int low = pw->sneak || p->job.kind != JOB_NONE;
+        if (low != pw->low) {
+            pw->low = low;
+            restack(pw);
+        }
+    }
+    if (g_restoring) restore_next();
+}
+
+// An app window filling the work area of its monitor (but not the whole
+// screen, as a game or a film would): returns that monitor, or NULL.
+static HMONITOR covering_app(HWND fg)
+{
+    wchar_t cls[32] = L"";
+    if (!fg || is_own_window(fg) || !IsWindowVisible(fg) || IsIconic(fg)) return NULL;
+    GetClassNameW(fg, cls, 32);
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
+        !wcscmp(cls, L"Shell_SecondaryTrayWnd"))
+        return NULL;
+    HMONITOR m = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof mi };
+    RECT r;
+    if (!GetWindowRect(fg, &r) || !GetMonitorInfoW(m, &mi)) return NULL;
+    RECT s = mi.rcMonitor, w = mi.rcWork;
+    if (r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom) return NULL;
+    return r.left <= w.left && r.top <= w.top && r.right >= w.right && r.bottom >= w.bottom ? m : NULL;
+}
+
+static void icons_every_second(void)
+{
+    ULONGLONG now = GetTickCount64();
+    HWND fg = GetForegroundWindow();
+    wchar_t cls[32] = L"";
+    if (fg) GetClassNameW(fg, cls, 32);
+    if (!g_sneak_at) g_sneak_at = now + (ULONGLONG)rand_in(SNEAK_MIN_MS, SNEAK_MAX_MS);
+    if (!g_feat_icons || g_restoring) {
+        g_desk_since = 0;
+        return;
+    }
+    // Looking at the desktop a minute or two: out they come and move some anyway.
+    if ((!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) && !g_focus) {
+        if (!g_desk_since) {
+            g_desk_since = now;
+            g_desk_wait = (ULONGLONG)rand_in(DESK_MIN_MS, DESK_MAX_MS);
+        } else if (now - g_desk_since >= g_desk_wait) {
+            scatter(NULL, 0);
+            g_desk_since = 0;
+        }
+    } else {
+        g_desk_since = 0;
+    }
+    // Busy in an app that hides the desktop: off they sneak behind it.
+    HMONITOR m = covering_app(fg);
+    if (m && now >= g_sneak_at) {
+        scatter(m, 1);
+        g_sneak_at = now + (ULONGLONG)rand_in(SNEAK_MIN_MS, SNEAK_MAX_MS);
+    }
+}
+
+/*
+ * The whip, drawn as a cursor (only over the pets): a curl of lash ending in
+ * a light popper at the hotspot, top-left, and a wooden handle at the bottom
+ * right. Outlined in white like the arrow.
+ */
+static HCURSOR make_whip(void)
+{
+    static const char *const ART[16] = {
+        "................",
+        ".TT.............",
+        ".TL.............",
+        "...L............",
+        "...L............",
+        "....L...........",
+        "....L....LLL....",
+        ".....L..L...L...",
+        "......LL....L...",
+        "............L...",
+        "...........HhH..",
+        "..........HhH...",
+        ".........HhH....",
+        "........HhH.....",
+        ".......GGH......",
+        ".......GG.......",
+    };
+    enum { A = 18 };                        // the art, with a pixel of room all round
+    const uint32_t EDGE = 0xFEFFFFFFu;      // the outline (marked, so it doesn't grow)
+    int size = GetSystemMetricsForDpi(SM_CXCURSOR, g_dpi), k = size / A < 1 ? 1 : size / A;
+    uint32_t art[A * A] = { 0 };
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            uint32_t c = 0;
+            switch (ART[y][x]) {
+            case 'L': c = 0xFF3B2A20u; break;
+            case 'T': c = 0xFFE8DCC8u; break;
+            case 'H': c = 0xFF8B5A2Bu; break;
+            case 'h': c = 0xFFC08A50u; break;
+            case 'G': c = 0xFF2B2B2Bu; break;
+            }
+            art[(y + 1) * A + x + 1] = c;
+        }
+    for (int y = 0; y < A; y++)
+        for (int x = 0; x < A; x++) {
+            if (art[y * A + x]) continue;
+            int by = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy, xx = x + dx;
+                    uint32_t v = yy >= 0 && yy < A && xx >= 0 && xx < A ? art[yy * A + xx] : 0;
+                    by |= v && v != EDGE;
+                }
+            if (by) art[y * A + x] = EDGE;
+        }
+    uint32_t *bits;
+    HBITMAP color = make_dib(size, size, &bits);
+    memset(bits, 0, (size_t)size * size * 4);
+    for (int y = 0; y < A * k && y < size; y++)
+        for (int x = 0; x < A * k && x < size; x++) {
+            uint32_t c = art[(y / k) * A + x / k];
+            bits[y * size + x] = c ? c | 0xFF000000u : 0;
+        }
+    void *zeros = calloc((size_t)((size + 15) / 16 * 2) * size, 1);
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, zeros);
+    ICONINFO ii = { FALSE, (DWORD)(2 * k), (DWORD)(2 * k), mask, color };   // hotspot on the popper
+    HCURSOR cur = (HCURSOR)CreateIconIndirect(&ii);
+    DeleteObject(mask);
+    DeleteObject(color);
+    free(zeros);
+    return cur;
+}
+
+// Quitting mid-job: the icon stays where it is, and that is written down.
+static void icons_quit(void)
+{
+    for (int i = 0; i < g_npets; i++)
+        if (g_pets[i]->pet.job.kind != JOB_NONE) job_end(g_pets[i]);
+}
+
 /* ---- tray & timers ---------------------------------------------------- */
 
 // The pomodoro's focus time is over, or it was stopped: so is the focus
@@ -724,6 +1267,7 @@ static void every_second(void)
         update_cleanup();
         if (g_feat_update) update_check(g_host, WM_UPDATE, 0);
     }
+    icons_every_second();
     g_world.cpu = g_world.cpu * 0.5 + sample_cpu() * 0.5;
     g_world.heat = sample_heat();
 
@@ -782,7 +1326,7 @@ static void tick(void)
             ShowWindow(pw->hwnd, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
             if (hide) {
                 tb_suspend(&pw->tb);
-                stairs_destroy(pw);   // rebuilt from the pet's state when it comes back
+                layers_destroy(pw);   // rebuilt from the pet's state when it comes back
                 present_catch(pw);
             }
         }
@@ -794,6 +1338,7 @@ static void tick(void)
         live[nlive++] = &pw->pet;
     }
     pets_together(live, nlive, &g_world);
+    icons_tick();
     int dressing = wardrobe_pet(), found = 0;   // close the wardrobe if its pet has gone
     for (int i = 0; i < nlive; i++) found |= live[i]->id == dressing && live[i]->state != ST_LEAVE;
     if (dressing && !found) wardrobe_close();
@@ -801,13 +1346,12 @@ static void tick(void)
         PetWin *pw = g_pets[i];
         if (pw->hidden) continue;
         present(pw);
-        present_stairs(pw);
+        present_layers(pw);
         present_catch(pw);
-        tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
+        if (pw->sneak) tb_suspend(&pw->tb);   // no giving itself away
+        else tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
         if (n % 60 == 0) {   // the taskbar likes to climb above us; text bubbles go above pets
-            SetWindowPos(pw->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            if (pw->st_hwnd)
-                SetWindowPos(pw->st_hwnd, pw->hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            restack(pw);
             if (pw->tb.shown)
                 SetWindowPos(pw->tb.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
@@ -862,8 +1406,7 @@ static void set_size(int size)
 static void wall_drawn(void)
 {
     if (g_npets) tb_hide(&g_pets[0]->tb);
-    for (int i = 0; i < g_npets; i++)
-        SetWindowPos(g_pets[i]->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    for (int i = 0; i < g_npets; i++) restack(g_pets[i]);
 }
 
 // Called by the picker's start button.
@@ -909,6 +1452,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_climb), IDM_FEAT_CLIMB, L"爬楼梯");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_update), IDM_FEAT_UPDATE, L"自动检查更新");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_icons), IDM_FEAT_ICONS, L"打乱桌面图标");
 
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
     for (int i = 0; i < g_npets; i++)
@@ -955,6 +1499,12 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
                 L"放置围墙");
     if (walls_count()) AppendMenuW(m, MF_STRING, IDM_WALL_CLEAR, L"拆掉所有围墙");
+    if (g_restoring) {
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"正在恢复桌面图标…");
+        AppendMenuW(m, MF_STRING, IDM_WHIP, g_whip ? L"收起鞭子" : L"拿出鞭子");
+    } else if (moved_check(icon_busy)) {
+        AppendMenuW(m, MF_STRING, IDM_ICONS_RESTORE, L"恢复桌面图标");
+    }
     if (g_feat_pomo || g_feat_water) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     if (g_feat_pomo && g_pomo) {
         HMENU pomo = CreatePopupMenu();
@@ -1043,6 +1593,18 @@ static void show_menu(PetWin *pw)
     case IDM_UPDATE_INSTALL:
         announce(L"正在下载新版本…", 60000, 0);
         update_install(g_host, WM_UPDATE);
+        break;
+    case IDM_FEAT_ICONS:
+        g_feat_icons = !g_feat_icons;
+        reg_set_dword(L"FeatIcons", (DWORD)g_feat_icons);
+        for (int i = 0; !g_feat_icons && i < g_npets; i++)   // stop right there
+            if (g_pets[i]->pet.job.kind == JOB_SCATTER || g_pets[i]->pet.paper) pet_caught(&g_pets[i]->pet);
+        break;
+    case IDM_ICONS_RESTORE:
+        restore_start();
+        break;
+    case IDM_WHIP:
+        g_whip = !g_whip && g_restoring;
         break;
     case IDM_FEAT_CLIMB:
         g_feat_climb = !g_feat_climb;
@@ -1145,8 +1707,18 @@ static LRESULT CALLBACK pet_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     PetWin *pw = (PetWin *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
+    case WM_SETCURSOR:
+        if (!g_whip) break;
+        if (!g_whip_cursor) g_whip_cursor = make_whip();
+        SetCursor(g_whip_cursor);
+        return TRUE;
+
     case WM_LBUTTONDOWN:
         if (!pw) return 0;
+        if (g_whip && pw->pet.job.kind == JOB_RESTORE) {   // crack!
+            pet_whip(&pw->pet);
+            return 0;
+        }
         SetCapture(pw->hwnd);   // the pet's own window, even when caught by its catch window
         g_press_pw = pw;
         g_dragging = 0;
@@ -1250,6 +1822,7 @@ static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_DESTROY:
+        icons_quit();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
@@ -1259,6 +1832,7 @@ static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     if (msg == g_msg_taskbar && g_msg_taskbar) {   // explorer restarted
+        icons_reset();
         tray_add();
         return 0;
     }
@@ -1375,6 +1949,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // for the desktop's icons (icons.c)
+    srand(GetTickCount());
     g_dpi = GetDpiForSystem();
     if (cli_enabled()) cli_write_shim();   // follow the exe if it was moved
     g_size = clampi((int)reg_get_dword(L"Size", 1), 0, 2, 1);
@@ -1387,6 +1963,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
     g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
     g_feat_update = reg_get_dword(L"FeatUpdate", 1) != 0;
+    g_feat_icons = reg_get_dword(L"FeatIcons", 1) != 0;
     g_update_next = GetTickCount64() + 60000;
     g_stair_style = clampi((int)reg_get_dword(L"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);
     g_pomo_focus = (int)reg_get_dword(L"PomoFocus", 25);

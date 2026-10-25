@@ -64,6 +64,9 @@ void outfit_roll(unsigned char *wear, unsigned *rng);
 // A school desk (focus mode) and prop (PROP_DESK and on) on it, where
 // draw_clawd puts it for a sprite at (ox, oy).
 void draw_desk(Canvas *c, int ox, int oy, int prop, int frame);
+// A paper cut-out of the pet drawn in crayon, sitting up as a sprite at
+// (ox, oy) would; stands in for it at its desk while it is away.
+void draw_paper(Canvas *c, int ox, int oy);
 // Fan with its top-left at (x, y); frame alternates the blades (+ / x).
 void draw_fan(Canvas *c, int x, int y, int frame);
 // Fills all of c (c->w by c->h) with red brick, courses along its longer side.
