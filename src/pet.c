@@ -1,5 +1,6 @@
 #include "pet.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SLEEP_AFTER_MS (5 * 60 * 1000)
