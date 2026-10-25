@@ -746,9 +746,10 @@ static HMONITOR pet_monitor(const Pet *p)
 
 /*
  * Now and then the pets move a desktop icon somewhere else, one each, 1-3 of
- * them at a time: while an app fills the screen, every 5-15 minutes, out of
- * sight behind it (and caught if seen); or right in front of the user, who
- * has been looking at the desktop for a minute or two (caught if clicked).
+ * them at a time, every 5-15 minutes while the user is in some app, down
+ * under its window: out of sight if it fills the screen (and caught if
+ * seen), otherwise where they can be seen (caught if clicked). Or right in
+ * front of the user, who has been looking at the desktop for a minute or two.
  * Where each icon was is kept (icons.c), so they can all be put back.
  */
 #define ICON_LIMIT   20                   // moved and not put back: no more after this
@@ -786,6 +787,15 @@ static void restack(PetWin *pw)
 static void set_sneak(PetWin *pw, int on)
 {
     pw->sneak = on;
+}
+
+// Down on the desktop while it is up to something with icons; on top otherwise.
+static void update_low(PetWin *pw)
+{
+    int low = pw->sneak || pw->pet.job.kind != JOB_NONE;
+    if (low == pw->low) return;
+    pw->low = low;
+    restack(pw);
 }
 
 // Someone is carrying it right now.
@@ -839,6 +849,7 @@ static int start_job(PetWin *pw, const IconJob *j, const wchar_t *name)
     pw->icon_name[ICON_NAME - 1] = 0;
     pw->icon_home = pw->icon_at = j->from;
     if (j->sneak) set_sneak(pw, 1);
+    update_low(pw);   // under the windows right away, before anyone can "see" it there on top
     return 1;
 }
 
@@ -1069,18 +1080,14 @@ static void icons_tick(void)
             if (p->job.kind != JOB_NONE) job_end(pw);
         }
         if (pw->sneak && p->job.kind == JOB_NONE && !p->paper) set_sneak(pw, 0);   // done (or caught)
-        int low = pw->sneak || p->job.kind != JOB_NONE;
-        if (low != pw->low) {
-            pw->low = low;
-            restack(pw);
-        }
+        update_low(pw);
     }
     if (g_restoring) restore_next();
 }
 
-// An app window filling the work area of its monitor (but not the whole
-// screen, as a game or a film would): returns that monitor, or NULL.
-static HMONITOR covering_app(HWND fg)
+// Some app's window is in front (not the desktop, the taskbar or one of
+// ours): returns its monitor, or NULL.
+static HMONITOR app_in_front(HWND fg)
 {
     wchar_t cls[32] = L"";
     if (!fg || is_own_window(fg) || !IsWindowVisible(fg) || IsIconic(fg)) return NULL;
@@ -1088,10 +1095,17 @@ static HMONITOR covering_app(HWND fg)
     if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
         !wcscmp(cls, L"Shell_SecondaryTrayWnd"))
         return NULL;
-    HMONITOR m = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+}
+
+// An app window filling the work area of its monitor (but not the whole
+// screen, as a game or a film would): returns that monitor, or NULL.
+static HMONITOR covering_app(HWND fg)
+{
+    HMONITOR m = app_in_front(fg);
     MONITORINFO mi = { sizeof mi };
     RECT r;
-    if (!GetWindowRect(fg, &r) || !GetMonitorInfoW(m, &mi)) return NULL;
+    if (!m || !GetWindowRect(fg, &r) || !GetMonitorInfoW(m, &mi)) return NULL;
     RECT s = mi.rcMonitor, w = mi.rcWork;
     if (r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom) return NULL;
     return r.left <= w.left && r.top <= w.top && r.right >= w.right && r.bottom >= w.bottom ? m : NULL;
@@ -1120,10 +1134,12 @@ static void icons_every_second(void)
     } else {
         g_desk_since = 0;
     }
-    // Busy in an app that hides the desktop: off they sneak behind it.
+    // Busy in an app that hides the desktop: off they sneak behind it. In
+    // one that leaves some desktop showing they go anyway, under its window,
+    // and can be seen (caught if clicked, as on the desktop).
     HMONITOR m = covering_app(fg);
-    if (m && now >= g_sneak_at) {
-        scatter(m, 1);
+    if ((m || app_in_front(fg)) && now >= g_sneak_at) {
+        scatter(m, m != NULL);
         g_sneak_at = now + (ULONGLONG)rand_in(SNEAK_MIN_MS, SNEAK_MAX_MS);
     }
 }
