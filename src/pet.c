@@ -2622,6 +2622,7 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
     int ok = 0;
     if (n > 16) n = 16;
     g_asked = 1;
+    if (who && !sociable(who, now)) who = NULL;   // busy (at the keyboard, say): two of the others, then
     for (int i = 0; i < n && !ok; i++) {
         Pet *a = who ? who : ps[i];
         if (sociable(a, now)) {
