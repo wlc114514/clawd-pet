@@ -37,7 +37,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE, IDM_FEAT_TOAST,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -83,7 +83,6 @@ static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscr
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
 static int g_feat_update = 1;   // look for a new version now and then
-static int g_feat_toast = 1;    // up onto Steam's popups
 static int g_focus;              // focus mode: everyone sits quietly at a desk (not kept)
 static int g_focus_pomo;         // ...turned on by the pomodoro, which turns it off again
 static int g_stair_style = STAIRS_SLAB;
@@ -338,11 +337,11 @@ static void present_stairs(PetWin *pw)
 {
     Canvas cv = { pw->st_px, 0, 0 };
     POINT pos;
-    if (!pet_stairs(&pw->pet, g_stair_style, &cv, &pos)) {
+    int k = pet_backdrop(&pw->pet, g_stair_style, &cv, &pos), first = !pw->st_hwnd;
+    if (!k) {
         stairs_destroy(pw);
         return;
     }
-    int k = pw->pet.stairs.scale, first = !pw->st_hwnd;
     if (first) {
         pw->st_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
                                       WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
@@ -520,7 +519,7 @@ static void sample_toast(void)
 {
     ULONGLONG now = GetTickCount64();
     RECT r;
-    HWND h = g_feat_toast ? find_toast(&r) : NULL;
+    HWND h = find_toast(&r);
     if (!h) {
         g_toast_hwnd = NULL;
         g_world.toast = TOAST_NONE;
@@ -909,7 +908,6 @@ static void show_menu(PetWin *pw)
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_pomo), IDM_FEAT_POMO, L"番茄钟");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_climb), IDM_FEAT_CLIMB, L"爬楼梯");
-    AppendMenuW(feat, MF_STRING | CHECK(g_feat_toast), IDM_FEAT_TOAST, L"跳上 Steam 弹窗");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_update), IDM_FEAT_UPDATE, L"自动检查更新");
 
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
@@ -1045,10 +1043,6 @@ static void show_menu(PetWin *pw)
     case IDM_UPDATE_INSTALL:
         announce(L"正在下载新版本…", 60000, 0);
         update_install(g_host, WM_UPDATE);
-        break;
-    case IDM_FEAT_TOAST:
-        g_feat_toast = !g_feat_toast;
-        reg_set_dword(L"FeatToast", (DWORD)g_feat_toast);
         break;
     case IDM_FEAT_CLIMB:
         g_feat_climb = !g_feat_climb;
@@ -1392,7 +1386,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
     g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
-    g_feat_toast = reg_get_dword(L"FeatToast", 1) != 0;
     g_feat_update = reg_get_dword(L"FeatUpdate", 1) != 0;
     g_update_next = GetTickCount64() + 60000;
     g_stair_style = clampi((int)reg_get_dword(L"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);

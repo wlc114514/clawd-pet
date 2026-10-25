@@ -754,8 +754,11 @@ void pet_begin_drag(Pet *p, POINT grab)
     p->vx = p->vy = 0;
     p->forced_sleep = 0;
     p->following = 0;
-    if (p->seat) p->seat = SEAT_HERE;   // focus mode: wherever it is put down, it sits there
-    p->desk = 0;                        // ...at a new desk; picked up, it leaves this one behind
+    if (p->desk) {                      // focus mode: out of its seat; the desk waits for it to walk back
+        p->desk = 0;
+        p->desk_left = 1;
+        p->seat = SEAT_AT;
+    }
     set_state(p, ST_DRAG, 0);
     say(p, G_EXCL, C_EXCL);
 }
@@ -806,9 +809,11 @@ static void sit_down(Pet *p)
     p->vx = p->vy = 0;
     p->following = 0;
     p->forced_sleep = 0;
-    if (!p->desk) p->desk_job = rr(p, 0, 1) ? PROP_BOOK : PROP_HOMEWORK;
+    if (!p->desk && !p->desk_left) p->desk_job = rr(p, 0, 1) ? PROP_BOOK : PROP_HOMEWORK;   // back: as it was
     p->desk = 1;
+    p->desk_left = 0;   // and if it couldn't get back to that one, it is gone
     p->seat_x = mid_x(p);
+    p->desk_y = feet_y(p);
     p->count = 0;
     set_state(p, ST_DESK, rr(p, 60, 300));   // dur: when the page turns, or the writing starts
 }
@@ -886,7 +891,7 @@ void pet_leave(Pet *p)
     p->forced_sleep = 0;
     p->following = 0;
     p->paused = 0;
-    p->desk = 0;
+    p->desk = p->desk_left = 0;
     p->seat = SEAT_NONE;
     p->vx = p->vy = 0;
     p->leave_kind = rr(p, 0, LEAVE_KINDS - 1);
@@ -977,10 +982,23 @@ static void stairs_bricks(Canvas *c, int x0, int y, int h, int stagger, int cap)
     }
 }
 
-int pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin)
+// The desk it was carried away from, just as it stands under a pet sitting at it.
+static int left_desk(const Pet *p, Canvas *c, POINT *origin)
+{
+    int k = p->scale;
+    c->w = DESK_W;
+    c->h = FOOT_Y - SPR_OY - 4;
+    cv_clear(c);
+    draw_desk(c, 3, -4, PROP_DESK, 0);   // where it would be for a sprite at (3, -4)
+    origin->x = (LONG)floor(p->seat_x + 0.5) - (SPR_OX + 9 - 3) * k;
+    origin->y = (LONG)floor(p->desk_y + 0.5) - c->h * k;
+    return k;
+}
+
+int pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin)
 {
     const Stairs *s = &p->stairs;
-    if (!s->n) return 0;
+    if (!s->n) return p->desk_left ? left_desk(p, c, origin) : 0;
     int W = s->n * STEP_W + 2, H = s->n * STEP_H + 1, k = s->scale;
     c->w = W;
     c->h = H;
@@ -1028,7 +1046,7 @@ int pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin)
 
     origin->x = (LONG)floor(s->x0 + 0.5) - (s->dir > 0 ? 1 : s->n * STEP_W + 1) * k;
     origin->y = (LONG)floor(s->base + 0.5) - H * k;
-    return 1;
+    return k;
 }
 
 // Ran into a wall on `side` (0: overhead). Starts ST_BUMP at tick t, so a
@@ -1072,7 +1090,7 @@ void pet_update(Pet *p, const World *w)
             set_state(p, ST_WAKE, 40);
             p->t = 14;
         }
-        p->desk = 0;
+        p->desk = p->desk_left = 0;
     }
 
     // Grounded states stick to the floor; if the floor moved away, fall.

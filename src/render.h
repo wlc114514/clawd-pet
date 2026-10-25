@@ -61,6 +61,9 @@ const char *acc_slot_name(int s);    // UTF-8
 int  acc_above(const unsigned char *wear);   // rows the hat adds above the head
 // Dresses at random: each slot has its own chance of getting something.
 void outfit_roll(unsigned char *wear, unsigned *rng);
+// A school desk (focus mode) and prop (PROP_DESK and on) on it, where
+// draw_clawd puts it for a sprite at (ox, oy).
+void draw_desk(Canvas *c, int ox, int oy, int prop, int frame);
 // Fan with its top-left at (x, y); frame alternates the blades (+ / x).
 void draw_fan(Canvas *c, int x, int y, int frame);
 // Fills all of c (c->w by c->h) with red brick, courses along its longer side.

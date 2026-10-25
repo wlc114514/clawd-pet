@@ -47,7 +47,7 @@ static void draw_wear(Canvas *c, int ox, int oy, const Pose *p, int layer);
 #define DESK_HOLE  0xFF3A2E26u
 #define PAPER      0xFFF4F1E8u
 
-static void draw_desk(Canvas *c, int ox, int oy, int prop, int frame)
+void draw_desk(Canvas *c, int ox, int oy, int prop, int frame)
 {
     int ty = oy + 4, ground = oy + FOOT_Y - SPR_OY, x0 = ox - 3, x1 = ox + 20;
     rect(c, x0, ty, x1, ty, DESK_TOP);

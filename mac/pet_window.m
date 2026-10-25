@@ -183,11 +183,11 @@ PetWindow *pet_window_pressed(void)
 {
     Canvas cv = { _stPx, 0, 0 };
     POINT pos;
-    if (!pet_stairs(&_pet, g_stair_style, &cv, &pos)) {
+    int k = pet_backdrop(&_pet, g_stair_style, &cv, &pos);
+    if (!k) {
         [self destroyStairs];
         return;
     }
-    int k = _pet.stairs.scale;
     BOOL first = !_stWin;
     if (first) {
         _stWin = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 1, 1)

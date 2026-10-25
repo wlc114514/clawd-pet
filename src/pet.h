@@ -126,6 +126,8 @@ typedef struct {
     int desk_job;           // what it does there: PROP_BOOK or PROP_HOMEWORK
     int seat;               // SEAT_*, handed out by pets_together() in focus mode
     double seat_x;          // where: screen x of the middle of the sprite
+    int desk_left;          // picked up from its desk, which waits at seat_x (on the floor at desk_y) for it
+    double desk_y;
     int toast_ph;           // ST_TOAST: 0 sliding over, 1 leaping up
     unsigned age;           // ticks since pet_init
     int drag_dx, drag_dy;
@@ -157,10 +159,12 @@ void pet_startle(Pet *p, double from_x);   // something scary happened at screen
 void pet_dress(Pet *p, const unsigned char *wear);   // new outfit (SLOTS entries)
 int  pet_can_climb(const Pet *p);
 void pet_climb(Pet *p);
-// Renders the stairs (if any) in STAIRS_* style into c, which must hold
-// STAIRS_CW x STAIRS_CH; sets c->w, c->h and the screen position of the
-// top-left corner.
-int  pet_stairs(const Pet *p, int style, Canvas *c, POINT *origin);
+// What stands apart from the pet, in a window of its own just below it: the
+// stairs it is climbing (in STAIRS_* style), or the desk it was carried away
+// from in focus mode. Renders it into c, which must hold STAIRS_CW x
+// STAIRS_CH, and sets c->w, c->h and the screen position of the top-left
+// corner. Returns the scale to draw it at, 0 if there is nothing.
+int  pet_backdrop(const Pet *p, int style, Canvas *c, POINT *origin);
 // The walls every pet collides with, as rectangles in screen pixels.
 void pet_set_walls(const RECT *walls, int n);
 POINT pet_head(const Pet *p);   // screen point just above the head
