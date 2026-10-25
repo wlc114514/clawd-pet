@@ -12,6 +12,8 @@ enum {
     ST_CLIMB,  // hopping up a staircase that pops out of the taskbar
     ST_BUMP,   // walked into a wall: splat, stagger back, see stars
     ST_FLIP,   // backflip: crouch, then a full turn backwards in the air
+    ST_SLIDE,  // a quick run-up, then sliding along the floor on its feet until it stops
+    ST_TOAST,  // a popup came up: sliding over to it (toast_ph 0), then a leap up on top (1)
     ST_TO_DESK,// focus mode: walking over to its seat (Pet.seat_x)
     ST_DESK,   // focus mode: sitting at a school desk, reading or writing (the typist: on a laptop)
     // Doing something with another pet (Pet.buddy); see pets_together().
@@ -32,6 +34,7 @@ enum { MOUSE_OFF, MOUSE_FOLLOW, MOUSE_SHY };
 enum { LEAVE_SHOCK, LEAVE_SHIVER, LEAVE_CRY, LEAVE_PANIC, LEAVE_KINDS };
 enum { CLAUDE_IDLE, CLAUDE_WORKING, CLAUDE_WAITING };
 enum { SEAT_NONE, SEAT_AT, SEAT_HERE };   // Pet.seat: none yet; walk to seat_x; sit wherever it is
+enum { TOAST_NONE, TOAST_UP, TOAST_DOWN };   // World.toast: none; coming up or showing; on its way out
 
 // Everything outside the pet that it reacts to, sampled once per tick.
 typedef struct {
@@ -45,6 +48,11 @@ typedef struct {
     int climb;         // may climb stairs on its own
     int heat;          // 0 fine, 1 warm: sweats, 2 hot: sweats more and fans itself
     int focus;         // focus mode: everyone sits quietly at a desk
+    // A popup from another app (a Steam notification) the pets can stand on.
+    int toast;         // TOAST_*
+    int toast_id;      // a new one for each popup
+    RECT toast_rc;     // where it is, screen px
+    DWORD toast_ms;    // how long it has been sitting still (0 while it comes up)
 } World;
 
 typedef struct {
@@ -114,10 +122,11 @@ typedef struct {
     int carrying;           // id of the pet standing on its head, 0 = none
     ULONGLONG social_at;    // no new games before this
     unsigned char wear[SLOTS];  // ACC_* per slot, rolled at random in pet_init
-    int desk;               // has its desk out (focus mode), even while being carried about with it
+    int desk;               // has its desk out (focus mode); picked up, it leaves it behind
     int desk_job;           // what it does there: PROP_BOOK or PROP_HOMEWORK
     int seat;               // SEAT_*, handed out by pets_together() in focus mode
     double seat_x;          // where: screen x of the middle of the sprite
+    int toast_ph;           // ST_TOAST: 0 sliding over, 1 leaping up
     unsigned age;           // ticks since pet_init
     int drag_dx, drag_dy;
     int zcount;
@@ -134,9 +143,14 @@ void pet_update(Pet *p, const World *w);
 void pet_render(const Pet *p, Canvas *c);
 void pet_begin_drag(Pet *p, POINT grab);
 void pet_end_drag(Pet *p);
+// In the air, a click anywhere in *r catches it (screen pixels); 0 if it is not.
+int  pet_catch_area(const Pet *p, RECT *r);
+// Caught in the air at `at`: held by the head as if dragged. 0 if not in the air.
+int  pet_catch(Pet *p, POINT at);
 void pet_click(Pet *p);
 void pet_cheer(Pet *p);
 void pet_flip(Pet *p);
+void pet_slide(Pet *p);
 void pet_sleep(Pet *p);
 void pet_leave(Pet *p);
 void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x

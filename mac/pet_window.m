@@ -52,6 +52,10 @@ PetWindow *pet_window_pressed(void)
     uint32_t _stPrev[STAIRS_CW * STAIRS_CH];
     int _stW, _stH, _stK, _stX, _stY;
 
+    // while it is in the air: a bigger panel just below it, there to the mouse
+    // but not to the eye, so it is easier to catch
+    NSPanel *_catchWin;
+
     BOOL _press, _dragging;
     POINT _pressPt;
     BOOL _hidden;
@@ -127,6 +131,7 @@ PetWindow *pet_window_pressed(void)
     if (hidden) {
         [_bubble suspend];
         [self destroyStairs];   // rebuilt from the pet's state when it comes back
+        [_catchWin orderOut:nil];
         [self orderOut:nil];
     } else {
         [self present];
@@ -236,6 +241,37 @@ PetWindow *pet_window_pressed(void)
     [_stWin orderWindow:NSWindowBelow relativeTo:self.windowNumber];
 }
 
+- (void)presentCatch
+{
+    RECT r;
+    if (!pet_catch_area(&_pet, &r)) {
+        // Not while it is being held: the panel that took the press gets the rest of it.
+        if (_catchWin.isVisible && !(_press && g_press == self)) [_catchWin orderOut:nil];
+        return;
+    }
+    if (!_catchWin) {
+        _catchWin = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 1, 1)
+                                               styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                                 backing:NSBackingStoreBuffered
+                                                   defer:NO];
+        _catchWin.opaque = NO;
+        _catchWin.backgroundColor = [NSColor colorWithWhite:0 alpha:0.01];   // hit by the mouse, unseen
+        _catchWin.hasShadow = NO;
+        _catchWin.level = PET_LEVEL;
+        _catchWin.collectionBehavior = self.collectionBehavior;
+        _catchWin.animationBehavior = NSWindowAnimationBehaviorNone;
+        _catchWin.releasedWhenClosed = NO;
+        _catchWin.hidesOnDeactivate = NO;
+        PetView *v = [[PetView alloc] initWithFrame:NSMakeRect(0, 0, 1, 1)];
+        v.owner = self;   // clicks on it are clicks on its pet
+        _catchWin.contentView = v;
+    }
+    NSRect want = mac_cocoa_rect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+    if (!NSEqualRects(_catchWin.frame, want)) [_catchWin setFrame:want display:NO];
+    if (!_catchWin.isVisible) [_catchWin orderFrontRegardless];
+    [_catchWin orderWindow:NSWindowBelow relativeTo:self.windowNumber];
+}
+
 /* ---- mouse ------------------------------------------------------------- */
 
 - (void)mouseDown:(NSEvent *)event
@@ -245,6 +281,7 @@ PetWindow *pet_window_pressed(void)
     _press = YES;
     _dragging = NO;
     plat_cursor(&_pressPt);
+    if (pet_catch(&_pet, _pressPt)) _dragging = YES;   // in the air: caught there and then
 }
 
 - (void)mouseDragged:(NSEvent *)event

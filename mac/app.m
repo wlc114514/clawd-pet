@@ -32,7 +32,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_OPEN, IDM_FEAT_UPDATE, IDM_FOCUS,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_OPEN, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE,
 };
 
 // Claude Code hook events, sent by `clawd --cc <name>`.
@@ -708,6 +708,7 @@ static int write_sheet(const char *path)
         if (pw.hiddenByFullscreen) continue;
         [pw present];
         [pw presentStairs];
+        [pw presentCatch];
         [pw.bubble update:pet_head(p) area:p->area];
         if (n % 60 == 0) [pw orderFrontRegardless];   // the Dock likes to climb above us
     }
@@ -891,11 +892,12 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     [set addItem:[NSMenuItem separatorItem]];
     add_item(set, @"检查更新（当前 v" CLAWD_VERSION "）", IDM_UPDATE_CHECK, NO, YES, self);
 
-    // In focus mode they stay at their desks: no flips, games or climbing.
+    // In focus mode they stay at their desks: no flips, slides, games or climbing.
     add_item(m, @"专注模式", IDM_FOCUS, g_focus, YES, self);
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
     add_item(m, @"后空翻", IDM_FLIP, NO, !g_focus, self);
+    add_item(m, @"滑一下", IDM_SLIDE, NO, !g_focus, self);
     add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
     NSMenu *play = [[NSMenu alloc] initWithTitle:@"一起玩"];
     add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, YES, self);
@@ -983,6 +985,10 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     case IDM_FLIP:
         for (PetWindow *p in g_pets)
             if (!pw || p == pw) pet_flip(p.pet);
+        break;
+    case IDM_SLIDE:
+        for (PetWindow *p in g_pets)
+            if (!pw || p == pw) pet_slide(p.pet);
         break;
     case IDM_CLIMB:
         for (PetWindow *p in g_pets)
