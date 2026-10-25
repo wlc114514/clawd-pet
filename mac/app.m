@@ -896,17 +896,20 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     add_item(m, @"专注模式", IDM_FOCUS, g_focus, YES, self);
     add_item(m, @"待在原地", IDM_PAUSE, paused, YES, self);
     add_item(m, @"去睡觉", IDM_SLEEP, NO, YES, self);
-    add_item(m, @"后空翻", IDM_FLIP, NO, !g_focus, self);
-    add_item(m, @"滑一下", IDM_SLIDE, NO, !g_focus, self);
     add_item(m, @"换装…", IDM_WARDROBE, NO, g_pets.count > 0, self);
+    // Tricks any one of them can do, then the games that take two.
     NSMenu *play = [[NSMenu alloc] initWithTitle:@"一起玩"];
-    add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, YES, self);
-    add_item(play, @"追着玩", IDM_PLAY_CHASE, NO, YES, self);
-    add_item(play, @"排队走", IDM_PLAY_LINE, NO, YES, self);
-    add_item(play, @"叠罗汉", IDM_PLAY_RIDE, NO, YES, self);
-    add_item(play, @"晕倒求安慰", IDM_PLAY_DAZE, NO, YES, self);
+    BOOL two = [self activePets] >= 2;
+    add_item(play, @"后空翻", IDM_FLIP, NO, YES, self);
+    add_item(play, @"滑一下", IDM_SLIDE, NO, YES, self);
+    [play addItem:[NSMenuItem separatorItem]];
+    add_item(play, @"打招呼聊天", IDM_PLAY_GREET, NO, two, self);
+    add_item(play, @"追着玩", IDM_PLAY_CHASE, NO, two, self);
+    add_item(play, @"排队走", IDM_PLAY_LINE, NO, two, self);
+    add_item(play, @"叠罗汉", IDM_PLAY_RIDE, NO, two, self);
+    add_item(play, @"晕倒求安慰", IDM_PLAY_DAZE, NO, two, self);
     add_submenu(m, @"一起玩", play);
-    m.itemArray.lastObject.enabled = [self activePets] >= 2 && !g_focus;
+    m.itemArray.lastObject.enabled = !g_focus;
     if (g_feat_climb) add_item(m, @"爬上去", IDM_CLIMB, NO, can_climb && !g_focus, self);
     add_item(m, @"放置围墙", IDM_WALL_DRAW, NO, walls_count() < MAX_WALLS && !walls_drawing(), self);
     if (walls_count()) add_item(m, @"拆掉所有围墙", IDM_WALL_CLEAR, NO, YES, self);

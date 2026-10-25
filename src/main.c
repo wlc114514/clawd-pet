@@ -940,16 +940,19 @@ static void show_menu(PetWin *pw)
     AppendMenuW(m, MF_STRING | CHECK(g_focus), IDM_FOCUS, L"专注模式");
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
-    AppendMenuW(m, MF_STRING | busy, IDM_FLIP, L"后空翻");
-    AppendMenuW(m, MF_STRING | busy, IDM_SLIDE, L"滑一下");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
+    // Tricks any one of them can do, then the games that take two.
     HMENU play = CreatePopupMenu();
-    AppendMenuW(play, MF_STRING, IDM_PLAY_GREET, L"打招呼聊天");
-    AppendMenuW(play, MF_STRING, IDM_PLAY_CHASE, L"追着玩");
-    AppendMenuW(play, MF_STRING, IDM_PLAY_LINE, L"排队走");
-    AppendMenuW(play, MF_STRING, IDM_PLAY_RIDE, L"叠罗汉");
-    AppendMenuW(play, MF_STRING, IDM_PLAY_DAZE, L"晕倒求安慰");
-    AppendMenuW(m, MF_POPUP | (active_pets() < 2 ? MF_GRAYED : busy), (UINT_PTR)play, L"一起玩");
+    UINT alone = active_pets() < 2 ? MF_GRAYED : 0;
+    AppendMenuW(play, MF_STRING, IDM_FLIP, L"后空翻");
+    AppendMenuW(play, MF_STRING, IDM_SLIDE, L"滑一下");
+    AppendMenuW(play, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(play, MF_STRING | alone, IDM_PLAY_GREET, L"打招呼聊天");
+    AppendMenuW(play, MF_STRING | alone, IDM_PLAY_CHASE, L"追着玩");
+    AppendMenuW(play, MF_STRING | alone, IDM_PLAY_LINE, L"排队走");
+    AppendMenuW(play, MF_STRING | alone, IDM_PLAY_RIDE, L"叠罗汉");
+    AppendMenuW(play, MF_STRING | alone, IDM_PLAY_DAZE, L"晕倒求安慰");
+    AppendMenuW(m, MF_POPUP | busy, (UINT_PTR)play, L"一起玩");
     if (g_feat_climb) AppendMenuW(m, MF_STRING | (can_climb ? busy : MF_GRAYED), IDM_CLIMB, L"爬上去");
     AppendMenuW(m, MF_STRING | (walls_count() >= MAX_WALLS || walls_drawing() ? MF_GRAYED : 0), IDM_WALL_DRAW,
                 L"放置围墙");
