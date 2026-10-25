@@ -1123,7 +1123,9 @@ static void icons_every_second(void)
         return;
     }
     // Looking at the desktop a minute or two: out they come and move some anyway.
-    if ((!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) && !g_focus) {
+    // (Our own menu or windows on top of it don't count as looking away.)
+    if (fg && is_own_window(fg) && !g_focus) {
+    } else if ((!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) && !g_focus) {
         if (!g_desk_since) {
             g_desk_since = now;
             g_desk_wait = (ULONGLONG)rand_in(DESK_MIN_MS, DESK_MAX_MS);
