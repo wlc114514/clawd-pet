@@ -4,7 +4,7 @@
 // The version this build is. Bump it (and mac/Info.plist) before tagging a
 // release; CI checks that the three agree.
 #ifndef CLAWD_VERSION   // (tests can pretend to be another one)
-#define CLAWD_VERSION "1.4.0"
+#define CLAWD_VERSION "1.4.1"
 #endif
 
 // Is version a ("v1.2.3" or "1.2.3") newer than b?
