@@ -66,6 +66,7 @@ PetWindow *pet_window_pressed(void);              // the pet being dragged, or n
 - (TextBubble *)bubble;
 - (void)present;
 - (void)presentStairs;
+- (void)presentCatch;                            // the bigger panel to catch it by, while in the air
 - (void)invalidate;                              // force a redraw and re-place
 - (void)setHiddenByFullscreen:(BOOL)hidden;
 - (BOOL)hiddenByFullscreen;

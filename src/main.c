@@ -37,7 +37,7 @@ enum {
     IDM_STAIRS_SLAB, IDM_STAIRS_SOLID, IDM_STAIRS_OUTLINE,   // same order as STAIRS_*
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
-    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS,
+    IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE, IDM_FEAT_TOAST,
 };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
@@ -65,6 +65,9 @@ typedef struct {
     int st_w, st_h, st_k;
     POINT st_pos;
     uint32_t st_px[STAIRS_CW * STAIRS_CH], st_prev[STAIRS_CW * STAIRS_CH];
+    // while it is in the air: a bigger window just below it, there to the mouse but not
+    // to the eye, so it is easier to catch
+    HWND catch_hwnd;
 } PetWin;
 
 static HINSTANCE g_inst;
@@ -80,6 +83,7 @@ static int g_size = 1, g_mouse_mode = MOUSE_OFF, g_typing_on = 1, g_hide_fullscr
 static int g_pomo_focus = 25, g_pomo_break = 5;   // minutes
 static int g_feat_pomo = 1, g_feat_water = 1, g_feat_climb = 1;   // features shown in the menu
 static int g_feat_update = 1;   // look for a new version now and then
+static int g_feat_toast = 1;    // up onto Steam's popups
 static int g_focus;              // focus mode: everyone sits quietly at a desk (not kept)
 static int g_focus_pomo;         // ...turned on by the pomodoro, which turns it off again
 static int g_stair_style = STAIRS_SLAB;
@@ -369,6 +373,23 @@ static void present_stairs(PetWin *pw)
         SetWindowPos(pw->st_hwnd, pw->hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
+static void present_catch(PetWin *pw)
+{
+    RECT r;
+    if (pw->hidden || !pet_catch_area(&pw->pet, &r)) {
+        if (pw->catch_hwnd && IsWindowVisible(pw->catch_hwnd)) ShowWindow(pw->catch_hwnd, SW_HIDE);
+        return;
+    }
+    if (!pw->catch_hwnd) {
+        pw->catch_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                         L"ClawdCatch", L"", WS_POPUP, 0, 0, 1, 1, NULL, NULL, g_inst, NULL);
+        SetWindowLongPtrW(pw->catch_hwnd, GWLP_USERDATA, (LONG_PTR)pw);
+        SetLayeredWindowAttributes(pw->catch_hwnd, 0, 1, LWA_ALPHA);   // alpha 1: hit by the mouse, unseen
+    }
+    SetWindowPos(pw->catch_hwnd, pw->hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
 static HICON make_icon(int size)
 {
     // The sprite's visible part is 16x10 (x 1..16), so it fits a 16px icon exactly.
@@ -446,6 +467,7 @@ static void destroy_pet(int idx)
     if (g_press_pw == pw) g_press_pw = NULL;
     tb_destroy(&pw->tb);
     stairs_destroy(pw);
+    if (pw->catch_hwnd) DestroyWindow(pw->catch_hwnd);
     DestroyWindow(pw->hwnd);
     DeleteDC(pw->memdc);
     if (pw->dib) DeleteObject(pw->dib);
@@ -471,6 +493,54 @@ static int is_typing_key(int vk)
     return vk == VK_BACK || vk == VK_RETURN || vk == VK_SPACE ||
            (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ||
            (vk >= VK_OEM_1 && vk <= VK_OEM_3) || (vk >= VK_OEM_4 && vk <= VK_OEM_7);
+}
+
+/*
+ * Steam's popups: SDL_app windows titled notificationtoasts_<n>_desktop.
+ * One slides up to just above the taskbar, sits there about 5 s, then slides
+ * back down out of sight.
+ */
+static HWND g_toast_hwnd;
+static RECT g_toast_last;
+static ULONGLONG g_toast_moved_at, g_toast_still_at;   // still_at: 0 while it is coming up
+
+static HWND find_toast(RECT *r)
+{
+    HWND h = NULL;
+    while ((h = FindWindowExW(NULL, h, L"SDL_app", NULL))) {
+        wchar_t t[64];
+        if (!IsWindowVisible(h) || !GetWindowTextW(h, t, 64) || wcsncmp(t, L"notificationtoasts_", 19)) continue;
+        GetWindowRect(h, r);
+        if (r->right > r->left && r->bottom > r->top) return h;
+    }
+    return NULL;
+}
+
+static void sample_toast(void)
+{
+    ULONGLONG now = GetTickCount64();
+    RECT r;
+    HWND h = g_feat_toast ? find_toast(&r) : NULL;
+    if (!h) {
+        g_toast_hwnd = NULL;
+        g_world.toast = TOAST_NONE;
+        return;
+    }
+    if (h != g_toast_hwnd) {   // a new one
+        g_toast_hwnd = h;
+        g_world.toast_id++;
+        g_world.toast = TOAST_UP;
+        g_toast_moved_at = now;
+        g_toast_still_at = 0;
+    } else if (memcmp(&r, &g_toast_last, sizeof r)) {
+        if (g_toast_still_at && r.top > g_toast_last.top) g_world.toast = TOAST_DOWN;   // on its way out
+        g_toast_moved_at = now;
+    } else if (!g_toast_still_at && now - g_toast_moved_at >= 300) {
+        g_toast_still_at = g_toast_moved_at;   // has come up
+    }
+    g_toast_last = r;
+    g_world.toast_rc = r;
+    g_world.toast_ms = g_toast_still_at ? (DWORD)(now - g_toast_still_at) : 0;
 }
 
 static void sample_input(void)
@@ -500,6 +570,7 @@ static void sample_input(void)
     g_world.cc = g_cc;
     g_world.climb = g_feat_climb;
     g_world.focus = g_focus;
+    sample_toast();
 }
 
 static ULONGLONG ft64(FILETIME f)
@@ -567,7 +638,7 @@ static int is_own_window(HWND h)
     GetClassNameW(h, cls, 32);
     return !wcscmp(cls, APP_NAME) || !wcscmp(cls, L"ClawdBubble") || !wcscmp(cls, HOST_CLASS) ||
            !wcscmp(cls, L"ClawdPicker") || !wcscmp(cls, L"ClawdStairs") || !wcscmp(cls, L"ClawdWall") ||
-           !wcscmp(cls, L"ClawdWallDraw") || !wcscmp(cls, L"ClawdWardrobe");
+           !wcscmp(cls, L"ClawdWallDraw") || !wcscmp(cls, L"ClawdWardrobe") || !wcscmp(cls, L"ClawdCatch");
 }
 
 // Monitor covered by a fullscreen foreground window (game, video, slides), or NULL.
@@ -713,6 +784,7 @@ static void tick(void)
             if (hide) {
                 tb_suspend(&pw->tb);
                 stairs_destroy(pw);   // rebuilt from the pet's state when it comes back
+                present_catch(pw);
             }
         }
         if (hide) {
@@ -731,6 +803,7 @@ static void tick(void)
         if (pw->hidden) continue;
         present(pw);
         present_stairs(pw);
+        present_catch(pw);
         tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
         if (n % 60 == 0) {   // the taskbar likes to climb above us; text bubbles go above pets
             SetWindowPos(pw->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -836,6 +909,7 @@ static void show_menu(PetWin *pw)
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_pomo), IDM_FEAT_POMO, L"番茄钟");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_water), IDM_FEAT_WATER, L"喝水提醒");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_climb), IDM_FEAT_CLIMB, L"爬楼梯");
+    AppendMenuW(feat, MF_STRING | CHECK(g_feat_toast), IDM_FEAT_TOAST, L"跳上 Steam 弹窗");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_update), IDM_FEAT_UPDATE, L"自动检查更新");
 
     int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
@@ -861,12 +935,13 @@ static void show_menu(PetWin *pw)
     AppendMenuW(set, MF_SEPARATOR, 0, NULL);
     AppendMenuW(set, MF_STRING, IDM_UPDATE_CHECK, L"检查更新（当前 v" CLAWD_VERSION L"）");
 
-    // In focus mode they stay at their desks: no flips, games or climbing.
+    // In focus mode they stay at their desks: no flips, slides, games or climbing.
     UINT busy = g_focus ? MF_GRAYED : 0;
     AppendMenuW(m, MF_STRING | CHECK(g_focus), IDM_FOCUS, L"专注模式");
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
     AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     AppendMenuW(m, MF_STRING | busy, IDM_FLIP, L"后空翻");
+    AppendMenuW(m, MF_STRING | busy, IDM_SLIDE, L"滑一下");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
     HMENU play = CreatePopupMenu();
     AppendMenuW(play, MF_STRING, IDM_PLAY_GREET, L"打招呼聊天");
@@ -936,6 +1011,10 @@ static void show_menu(PetWin *pw)
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_flip(&g_pets[i]->pet);
         break;
+    case IDM_SLIDE:
+        for (int i = 0; i < g_npets; i++)
+            if (!pw || g_pets[i] == pw) pet_slide(&g_pets[i]->pet);
+        break;
     case IDM_CLIMB:
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) pet_climb(&g_pets[i]->pet);
@@ -963,6 +1042,10 @@ static void show_menu(PetWin *pw)
     case IDM_UPDATE_INSTALL:
         announce(L"正在下载新版本…", 60000, 0);
         update_install(g_host, WM_UPDATE);
+        break;
+    case IDM_FEAT_TOAST:
+        g_feat_toast = !g_feat_toast;
+        reg_set_dword(L"FeatToast", (DWORD)g_feat_toast);
         break;
     case IDM_FEAT_CLIMB:
         g_feat_climb = !g_feat_climb;
@@ -1066,10 +1149,12 @@ static LRESULT CALLBACK pet_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     PetWin *pw = (PetWin *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
     case WM_LBUTTONDOWN:
-        SetCapture(hwnd);
+        if (!pw) return 0;
+        SetCapture(pw->hwnd);   // the pet's own window, even when caught by its catch window
         g_press_pw = pw;
         g_dragging = 0;
         GetCursorPos(&g_press_pt);
+        if (pet_catch(&pw->pet, g_press_pt)) g_dragging = 1;   // in the air: caught there and then
         return 0;
 
     case WM_MOUSEMOVE:
@@ -1304,6 +1389,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     g_feat_pomo = reg_get_dword(L"FeatPomo", 1) != 0;
     g_feat_water = reg_get_dword(L"FeatWater", 1) != 0;
     g_feat_climb = reg_get_dword(L"FeatClimb", 1) != 0;
+    g_feat_toast = reg_get_dword(L"FeatToast", 1) != 0;
     g_feat_update = reg_get_dword(L"FeatUpdate", 1) != 0;
     g_update_next = GetTickCount64() + 60000;
     g_stair_style = clampi((int)reg_get_dword(L"StairStyle", STAIRS_SLAB), 0, STAIRS_STYLES - 1, STAIRS_SLAB);
@@ -1326,6 +1412,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     wc.lpfnWndProc = DefWindowProcW;
     wc.lpszClassName = L"ClawdStairs";
     RegisterClassW(&wc);
+    wc.lpfnWndProc = pet_proc;   // clicks on it are clicks on its pet
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"ClawdCatch";
+    RegisterClassW(&wc);
+    wc.hbrBackground = NULL;
     tb_register(inst);
     picker_register(inst);
     wardrobe_register(inst);
