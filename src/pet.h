@@ -207,6 +207,11 @@ void pet_startle(Pet *p, double from_x);   // something scary happened at screen
 void pet_dress(Pet *p, const unsigned char *wear);   // new outfit (SLOTS entries)
 int  pet_can_climb(const Pet *p);
 void pet_climb(Pet *p);
+// The user wants something of it: it drops whatever it is doing (wakes up,
+// leaves a game, comes down off stairs or a wall, lets go of an icon job).
+// 1 if it is free on the floor now; 0 if not yet (coming down first) or not
+// at all (being dragged or sent away).
+int  pet_interrupt(Pet *p);
 // What stands apart from the pet, in a window of its own just below it: the
 // stairs it is climbing (in STAIRS_* style), or the desk it was carried away
 // from in focus mode. Renders it into c, which must hold STAIRS_CW x

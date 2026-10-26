@@ -983,19 +983,19 @@ static void add_submenu(NSMenu *m, NSString *title, NSMenu *sub)
     }
     case IDM_SLEEP:
         for (PetWindow *p in g_pets)
-            if (!pw || p == pw) pet_sleep(p.pet);
+            if ((!pw || p == pw) && pet_interrupt(p.pet)) pet_sleep(p.pet);   // drops whatever it was doing
         break;
     case IDM_FLIP:
         for (PetWindow *p in g_pets)
-            if (!pw || p == pw) pet_flip(p.pet);
+            if ((!pw || p == pw) && pet_interrupt(p.pet)) pet_flip(p.pet);   // drops whatever it was doing
         break;
     case IDM_SLIDE:
         for (PetWindow *p in g_pets)
-            if (!pw || p == pw) pet_slide(p.pet);
+            if ((!pw || p == pw) && pet_interrupt(p.pet)) pet_slide(p.pet);   // drops whatever it was doing
         break;
     case IDM_CLIMB:
         for (PetWindow *p in g_pets)
-            if (!pw || p == pw) pet_climb(p.pet);
+            if ((!pw || p == pw) && pet_interrupt(p.pet)) pet_climb(p.pet);   // drops whatever it was doing
         break;
     case IDM_WALL_DRAW:
         [self announce:@"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消" ms:30000 cheer:NO];

@@ -86,6 +86,8 @@ typedef struct {
                                   // the stairs, the real icon only moves once it is put down
     int icon_put;                 // the real icon has been put down
     int sneak;                    // keeping out of sight (caught if seen)
+    int asked;                    // IDM_* the user asked of it, waiting for it to be free (it had to land first)
+    ULONGLONG asked_until;
     int low;                      // down on the desktop under every window, as while it has an icon
 } PetWin;
 
@@ -761,7 +763,7 @@ static HMONITOR pet_monitor(const Pet *p)
 
 static ULONGLONG g_sneak_at;              // next time they sneak off to move some
 static ULONGLONG g_desk_since, g_desk_wait;   // looking at the desktop since; how long before they move some
-static int g_restoring, g_restorers;      // putting them all back; how many pets at once
+static int g_restoring;                   // putting them all back, every pet there is
 static MovedIcon g_queue[MAX_QUEUE];      // ...still to go
 static int g_nqueue;
 static int g_whip;                        // the whip is out (while restoring)
@@ -891,7 +893,8 @@ static void scatter(HMONITOR m, int sneak)
     for (int i = 0; i < g_npets; i++) {
         PetWin *pw = g_pets[i];
         HMONITOR pm = pet_monitor(&pw->pet);
-        if (pw->hidden || pw->pet.job.kind != JOB_NONE || pw->pet.state == ST_LEAVE || (m && pm != m) || pm == fs)
+        if (pw->hidden || pw->pet.job.kind != JOB_NONE || pw->pet.state == ST_LEAVE || pw->pet.paused || (m && pm != m) ||
+            pm == fs)
             continue;
         can[n++] = pw;
     }
@@ -908,8 +911,57 @@ static void scatter(HMONITOR m, int sneak)
         }
 }
 
+// The user wants something of pw: it drops whatever it is doing, an icon
+// it was taking somewhere included (the real one hasn't moved yet: it stays
+// where it is). 1 if it is free for it now, 0 if not yet (it has to come down
+// first) or not at all (being dragged).
+static int interrupt(PetWin *pw)
+{
+    Pet *p = &pw->pet;
+    if (p->job.kind != JOB_NONE && p->job.status == JOB_ON && p->leg != 2) p->job.at = pw->icon_at;
+    int ok = pet_interrupt(p);
+    if (p->job.kind != JOB_NONE && p->job.status != JOB_ON) job_end(pw);
+    return ok;
+}
+
+// Does what the user picked from the menu, once pw is free for it.
+static void do_asked(PetWin *pw, int cmd)
+{
+    Pet *p = &pw->pet;
+    if (cmd == IDM_SLEEP) pet_sleep(p);
+    if (cmd == IDM_FLIP) pet_flip(p);
+    if (cmd == IDM_SLIDE) pet_slide(p);
+    if (cmd == IDM_CLIMB) pet_climb(p);
+}
+
+// The user asks pw to do cmd: it drops what it is doing and does it, right
+// away or as soon as it has come down (if that's within a few seconds).
+static void ask(PetWin *pw, int cmd)
+{
+    pw->asked = 0;
+    if (interrupt(pw)) {
+        do_asked(pw, cmd);
+    } else {
+        pw->asked = cmd;
+        pw->asked_until = GetTickCount64() + 4000;
+    }
+}
+
+static void asks_tick(void)
+{
+    ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < g_npets; i++) {
+        PetWin *pw = g_pets[i];
+        if (!pw->asked) continue;
+        if (now > pw->asked_until || pw->pet.state == ST_LEAVE) pw->asked = 0;
+        else if (interrupt(pw)) ask(pw, pw->asked);
+    }
+}
+
 static void restore_start(void)
 {
+    for (int i = 0; i < g_npets; i++)   // off they come, icons they were moving and all
+        if (g_pets[i]->pet.job.kind == JOB_SCATTER) interrupt(g_pets[i]);
     moved_check(icon_busy);
     MovedIcon *m = malloc(sizeof *m * MAX_QUEUE);
     int n = moved_load(m, MAX_QUEUE);
@@ -919,7 +971,6 @@ static void restore_start(void)
     free(m);
     if (!g_nqueue) return;
     g_restoring = 1;
-    g_restorers = rand_in(1, 3);
     announce(L"好啦好啦，这就搬回去……", 4000, 0);
 }
 
@@ -932,7 +983,7 @@ static void restore_next(void)
         announce(L"桌面图标都放回去啦", 4000, 0);
         return;
     }
-    if (!g_nqueue || busy >= g_restorers) return;
+    if (!g_nqueue) return;
     MovedIcon *it = &g_queue[g_nqueue - 1];
     POINT now;
     if (!icons_find(it->name, &now) || now.x != it->now.x || now.y != it->now.y) {   // gone, or the user moved it
@@ -949,7 +1000,7 @@ static void restore_next(void)
             continue;
         someone = 1;
         IconJob j = { JOB_RESTORE, JOB_ON, icons_size(), now, it->home, now, 0 };
-        if (!pw->hidden && pw->pet.job.kind == JOB_NONE && start_job(pw, &j, it->name)) {
+        if (!pw->hidden && pw->pet.job.kind == JOB_NONE && interrupt(pw) && start_job(pw, &j, it->name)) {
             g_nqueue--;
             return;
         }
@@ -1357,6 +1408,7 @@ static void tick(void)
     }
     pets_together(live, nlive, &g_world);
     icons_tick();
+    asks_tick();
     int dressing = wardrobe_pet(), found = 0;   // close the wardrobe if its pet has gone
     for (int i = 0; i < nlive; i++) found |= live[i]->id == dressing && live[i]->state != ST_LEAVE;
     if (dressing && !found) wardrobe_close();
@@ -1573,20 +1625,11 @@ static void show_menu(PetWin *pw)
             if (!pw || g_pets[i] == pw) g_pets[i]->pet.paused = !paused;
         break;
     case IDM_SLEEP:
-        for (int i = 0; i < g_npets; i++)
-            if (!pw || g_pets[i] == pw) pet_sleep(&g_pets[i]->pet);
-        break;
     case IDM_FLIP:
-        for (int i = 0; i < g_npets; i++)
-            if (!pw || g_pets[i] == pw) pet_flip(&g_pets[i]->pet);
-        break;
     case IDM_SLIDE:
-        for (int i = 0; i < g_npets; i++)
-            if (!pw || g_pets[i] == pw) pet_slide(&g_pets[i]->pet);
-        break;
     case IDM_CLIMB:
         for (int i = 0; i < g_npets; i++)
-            if (!pw || g_pets[i] == pw) pet_climb(&g_pets[i]->pet);
+            if (!pw || g_pets[i] == pw) ask(g_pets[i], cmd);
         break;
     case IDM_WALL_DRAW:
         announce(L"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消", 30000, 0);

@@ -804,6 +804,50 @@ static int airborne(const Pet *p)
            (p->state == ST_FLIP && p->t >= FLIP_CROUCH);
 }
 
+// Out of anything it is in with another pet, or asleep: free for whatever
+// comes next (any partner is let go of on the next tick, in pets_together).
+static void let_go(Pet *p)
+{
+    p->buddy = 0;
+    p->carrying = 0;   // anyone on its head jumps off
+    p->following = 0;
+    p->forced_sleep = 0;
+}
+
+int pet_interrupt(Pet *p)
+{
+    int s = p->state;
+    if (s == ST_DRAG || s == ST_LEAVE || airborne(p)) return 0;
+    if (s == ST_ICON) {
+        if (p->icon_ph == IC_SHOCK) return 0;   // let it get over the fright first
+        icon_drop(p);
+    }
+    if (s == ST_CLIMB) stairs_crumble(p);
+    let_go(p);
+    p->vx = p->vy = 0;
+    if (s == ST_ICON || s == ST_CLIMB || s == ST_RIDE || p->perch) {   // up on stairs, a head, a floor of its own
+        p->perch = 0;
+        if (p->y < ground_y(p) - 1) {   // jumps down
+            set_state(p, ST_FALL, 0);
+            return 0;
+        }
+    }
+    if (feet_y(p) < p->area.bottom - 1) {   // standing on a wall: walks off its nearer end
+        double k = p->scale;
+        for (int i = 0; i < g_nwalls; i++) {
+            const RECT *w = &g_walls[i];
+            if (fabs(w->top - feet_y(p)) < 2 && mid_x(p) > w->left - 9 * k && mid_x(p) < w->right + 9 * k) {
+                p->dir = mid_x(p) - w->left < w->right - mid_x(p) ? -1 : 1;
+                break;
+            }
+        }
+        if (s != ST_WALK) set_state(p, ST_WALK, 900);
+        return 0;
+    }
+    if (s != ST_DESK && s != ST_IDLE && s != ST_WALK) set_state(p, ST_IDLE, rr(p, 30, 90));
+    return 1;
+}
+
 int pet_catch_area(const Pet *p, RECT *r)
 {
     if (!airborne(p)) return 0;
@@ -1452,7 +1496,7 @@ static Pose icon_update(Pet *p, int blinking)
 int pet_fetch(Pet *p, const IconJob *j)
 {
     int s = p->state, face;
-    if (!(is_free(s) || s == ST_DESK || s == ST_LAND) || p->paused || p->carrying || p->buddy ||
+    if (!(is_free(s) || s == ST_DESK || s == ST_LAND) || p->carrying || p->buddy ||
         p->stairs.n || p->zig.n || p->perch || fabs(feet_y(p) - p->area.bottom) > 1)
         return 0;   // busy, or not down on the floor
     if (!zig_to(p, &g_zig_plan, j->to, j->size, &face) || !zig_to(p, &p->zig, j->from, j->size, &p->face))
@@ -2421,11 +2465,16 @@ static int quiet(const Pet *p)
     return g_hot || g_focus || (g_busy && p->typist);
 }
 
-// Free to start something with another pet.
+// Free to start something with another pet. Asked for (pets_play), any
+// pet on its feet will do: it drops whatever it is doing.
 static int sociable(const Pet *p, ULONGLONG now)
 {
-    return (p->state == ST_IDLE || p->state == ST_WALK) && !p->paused && !p->following &&
-           !p->buddy && !p->carrying && !quiet(p) && (g_asked || now >= p->social_at);
+    int s = p->state;
+    if (g_asked)
+        return s != ST_DRAG && s != ST_LEAVE && s != ST_ICON && s != ST_CLIMB && s != ST_RIDE && !airborne(p) &&
+               !p->perch && !quiet(p);
+    return (s == ST_IDLE || s == ST_WALK) && !p->paused && !p->following && !p->buddy && !p->carrying && !quiet(p) &&
+           now >= p->social_at;
 }
 
 // Close enough to play with, `px` at scale 4.
@@ -2529,6 +2578,7 @@ static int start_chase(Pet **ps, int n, Pet *a, ULONGLONG now)
         if (b == a || !sociable(b, now) || !side_by_side(a, b) || !within(a, b, 900)) continue;
         Pet *two[2] = { a, b };
         for (int j = 0; j < 2; j++) {
+            let_go(two[j]);
             two[j]->buddy = two[!j]->id;
             two[j]->role = j == 0;      // a is "it"
             two[j]->following = 0;
@@ -2558,13 +2608,14 @@ static int start_line(Pet **ps, int n, Pet *a, ULONGLONG now)
             line[j - 1] = t;
         }
     double pos = (mid_x(a) - a->area.left) / (double)(a->area.right - a->area.left);
+    let_go(a);
     a->dir = pos < 0.5 ? 1 : -1;      // the side with more room
-    a->following = 0;
     a->social_at = now + SOCIAL_MS;
     set_state(a, ST_WALK, rr(a, 250, 450));
     say(a, G_NOTE, C_NOTE);
     for (int i = 0; i < m; i++) {
         Pet *p = line[i];
+        let_go(p);
         p->buddy = (i ? line[i - 1] : a)->id;
         p->role = a->dir;
         p->following = 0;
@@ -2584,6 +2635,8 @@ static int start_ride(Pet **ps, int n, Pet *a, ULONGLONG now)
         top.x = b->x;
         top.y = b->y - (FOOT_Y - SPR_OY) * b->scale;
         if (top.y + (SPR_OY - 12) * top.scale < b->area.top || in_wall(&top)) continue;
+        let_go(a);
+        let_go(b);
         a->buddy = b->id;
         a->role = GO_RIDE;
         a->following = 0;
@@ -2603,6 +2656,8 @@ static int start_greet(Pet **ps, int n, Pet *a, ULONGLONG now)
     for (int i = 0; i < n; i++) {
         Pet *b = ps[i];
         if (b == a || !sociable(b, now) || !side_by_side(a, b)) continue;
+        let_go(a);
+        let_go(b);
         a->buddy = b->id;
         a->role = GO_GREET;
         a->following = 0;
@@ -2627,6 +2682,7 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
         Pet *a = who ? who : ps[i];
         if (sociable(a, now)) {
             if (what == PLAY_DAZE) {   // keels over; the nearest free one, however far, comes to pat it
+                let_go(a);
                 start_bump(a, 0, BUMP_LAND);
                 Pet *best = NULL;
                 for (int j = 0; j < n; j++) {
@@ -2636,6 +2692,7 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
                         best = c;
                 }
                 if (best) {
+                    let_go(best);
                     best->buddy = a->id;
                     best->role = GO_COMFORT;
                     best->following = 0;
