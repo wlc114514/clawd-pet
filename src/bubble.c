@@ -1,10 +1,9 @@
 #include "bubble.h"
 #include <stdint.h>
 #include <string.h>
+#include "ui.h"
 
 #define TB_CLASS  L"ClawdBubble"
-#define COL_INK   0xFF2B2B2Bu
-#define COL_PAPER 0xFFFFFFFFu
 
 static LRESULT CALLBACK tb_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -26,24 +25,60 @@ void tb_register(HINSTANCE inst)
     RegisterClassW(&wc);
 }
 
-void tb_show(TextBubble *b, const wchar_t *text, DWORD ms)
-{
-    wcsncpy(b->text, text, 127);
-    b->text[127] = 0;
-    b->until = GetTickCount64() + ms;
-    b->tail = -1;
-}
-
-void tb_suspend(TextBubble *b)
+static void put_away(TextBubble *b)
 {
     if (b->hwnd && b->shown) ShowWindow(b->hwnd, SW_HIDE);
     b->shown = 0;
 }
 
+static void say(TextBubble *b, const wchar_t *text, DWORD ms, int kind)
+{
+    wcsncpy(b->text, text, 127);
+    b->text[127] = 0;
+    b->until = GetTickCount64() + ms;
+    b->kind = kind;
+    b->paused = 0;
+    b->tail = -1;
+}
+
+void tb_show(TextBubble *b, const wchar_t *text, DWORD ms, int kind)
+{
+    ULONGLONG now = GetTickCount64();
+    DWORD left = b->paused ? b->paused : b->until > now ? (DWORD)(b->until - now) : 0;
+    if (b->kind && b->kind != kind && left > 1000) {   // a reminder with time to go: it waits its turn
+        wcscpy(b->back, b->text);
+        b->back_kind = b->kind;
+        b->back_ms = left;
+    }
+    if (b->back_kind == kind) b->back_kind = 0;   // this is the newer word on that
+    say(b, text, ms, kind);
+}
+
+void tb_suspend(TextBubble *b)
+{
+    ULONGLONG now = GetTickCount64();
+    put_away(b);
+    if (b->kind && !b->paused && b->until > now) b->paused = (DWORD)(b->until - now);
+}
+
 void tb_hide(TextBubble *b)
 {
+    if (b->back_kind) {   // on to the reminder that was waiting
+        int kind = b->back_kind;
+        b->back_kind = 0;
+        say(b, b->back, b->back_ms, kind);
+        return;
+    }
     b->until = 0;
-    tb_suspend(b);
+    b->kind = 0;
+    b->paused = 0;
+    put_away(b);
+}
+
+void tb_drop(TextBubble *b, int kind)
+{
+    if (b->back_kind == kind) b->back_kind = 0;
+    if (b->until && b->kind == kind) tb_hide(b);
 }
 
 void tb_destroy(TextBubble *b)
@@ -52,24 +87,13 @@ void tb_destroy(TextBubble *b)
     b->hwnd = NULL;
     b->until = 0;
     b->shown = 0;
+    b->kind = b->back_kind = 0;
+    b->paused = 0;
 }
 
 static HFONT make_font(UINT dpi)
 {
-    return CreateFontW(-MulDiv(15, dpi, 96), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
-                       0, 0, ANTIALIASED_QUALITY, 0, L"Microsoft YaHei UI");
-}
-
-static HBITMAP make_dib(HDC dc, int w, int h, uint32_t **bits)
-{
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)bits, NULL, 0);
+    return ui_font(MulDiv(15, dpi, 96), FW_SEMIBOLD);
 }
 
 // Measure the text and work out the window size (border units of u px).
@@ -111,7 +135,7 @@ static void tb_draw(TextBubble *b, POINT pos, UINT dpi)
 
     HDC dc = CreateCompatibleDC(NULL);
     uint32_t *px, *tx;
-    HBITMAP bmp = make_dib(dc, W, H, &px), obmp = SelectObject(dc, bmp);
+    HBITMAP bmp = ui_dib(W, H, &px), obmp = SelectObject(dc, bmp);
     memset(px, 0, (size_t)W * H * 4);
 
     for (int uy = 0; uy < UH + 2; uy++)
@@ -135,7 +159,7 @@ static void tb_draw(TextBubble *b, POINT pos, UINT dpi)
 
     // Render white-on-black grayscale text, then use it as coverage.
     HDC tdc = CreateCompatibleDC(NULL);
-    HBITMAP tbmp = make_dib(tdc, ts.cx, ts.cy, &tx), otbmp = SelectObject(tdc, tbmp);
+    HBITMAP tbmp = ui_dib(ts.cx, ts.cy, &tx), otbmp = SelectObject(tdc, tbmp);
     memset(tx, 0, (size_t)ts.cx * ts.cy * 4);
     HFONT f = make_font(dpi), of = SelectObject(tdc, f);
     SetTextColor(tdc, RGB(255, 255, 255));
@@ -170,9 +194,13 @@ static void tb_draw(TextBubble *b, POINT pos, UINT dpi)
 void tb_update(TextBubble *b, POINT anchor, RECT area, UINT dpi)
 {
     if (!b->until) return;
+    if (b->paused) {   // back in sight: its time runs again
+        b->until = GetTickCount64() + b->paused;
+        b->paused = 0;
+    }
     if (GetTickCount64() >= b->until) {
         tb_hide(b);
-        return;
+        if (!b->until) return;
     }
     if (!b->hwnd) {
         b->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,

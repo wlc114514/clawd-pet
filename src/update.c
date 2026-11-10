@@ -70,7 +70,8 @@ static DWORD http_open(const wchar_t *url, int follow, HINTERNET h[3])
 }
 
 // GET url into a malloc'd buffer, following redirects. NULL unless the
-// answer was 200 and at most `max` bytes.
+// answer was 200, at most `max` bytes, and as long as the server said it
+// would be.
 static char *http_get(const wchar_t *url, DWORD max, DWORD *len)
 {
     HINTERNET h[3];
@@ -86,6 +87,10 @@ static char *http_get(const wchar_t *url, DWORD max, DWORD *len)
         if (!WinHttpReadData(h[2], buf + n, avail, &got)) goto fail;
         n += got;
     }
+    DWORD said = 0, sz = sizeof said;
+    if (WinHttpQueryHeaders(h[2], WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
+                            &said, &sz, WINHTTP_NO_HEADER_INDEX) && said != n)
+        goto fail;   // cut short
     *len = n;
     goto done;
 fail:
@@ -142,6 +147,25 @@ void update_check(HWND notify, UINT msg, int manual)
 
 /* ---- install ---------------------------------------------------------- */
 
+// A whole Windows program: the headers are where they should be, and every
+// section they list is inside the file (a download cut short fails here).
+static int whole_exe(const char *bin, DWORD len)
+{
+    const IMAGE_DOS_HEADER *dos = (const void *)bin;
+    if (len < sizeof *dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
+        (DWORD)dos->e_lfanew > len - sizeof(IMAGE_NT_HEADERS64))
+        return 0;
+    const IMAGE_NT_HEADERS64 *nt = (const void *)(bin + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) return 0;
+    DWORD first = (DWORD)dos->e_lfanew + 4 + sizeof nt->FileHeader + nt->FileHeader.SizeOfOptionalHeader;
+    DWORD count = nt->FileHeader.NumberOfSections;
+    if (!count || first > len || count > (len - first) / sizeof(IMAGE_SECTION_HEADER)) return 0;
+    const IMAGE_SECTION_HEADER *sec = (const void *)(bin + first);
+    for (DWORD i = 0; i < count; i++)
+        if (sec[i].PointerToRawData > len || sec[i].SizeOfRawData > len - sec[i].PointerToRawData) return 0;
+    return 1;
+}
+
 // clawd.exe, clawd.exe.new, clawd.exe.old
 static void exe_paths(wchar_t *exe, wchar_t *fresh, wchar_t *old)
 {
@@ -159,7 +183,7 @@ static DWORD WINAPI install_thread(void *arg)
     wsprintfW(url, REPO L"download/%hs/clawd.exe", g_tag);
     DWORD len = 0;
     char *bin = g_tag[0] ? http_get(url, MAX_EXE, &len) : NULL;
-    if (bin && len > 100000 && bin[0] == 'M' && bin[1] == 'Z') {   // looks like an exe
+    if (bin && len > 100000 && whole_exe(bin, len)) {   // it is an exe, all of it
         HANDLE f = CreateFileW(fresh, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         DWORD wrote = 0;
         int ok = f != INVALID_HANDLE_VALUE && WriteFile(f, bin, len, &wrote, NULL) && wrote == len;

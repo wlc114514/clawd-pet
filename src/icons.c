@@ -306,6 +306,14 @@ static LONG grid_phase(const LONG *v, int n, LONG m, LONG def)
     return best;
 }
 
+int icons_same_spot(POINT a, POINT b)
+{
+    IFolderView2 *fv = view();
+    POINT sp = { 0, 0 };
+    if (!fv || FAILED(IFolderView2_GetSpacing(fv, &sp)) || sp.x <= 0 || sp.y <= 0) sp.x = sp.y = 32;
+    return labs(a.x - b.x) < sp.x / 2 && labs(a.y - b.y) < sp.y / 2;
+}
+
 int icons_free_spots(POINT *out, int max, const RECT *in)
 {
     IFolderView2 *fv = view();
@@ -407,7 +415,7 @@ int moved_check(int (*skip)(const wchar_t *name))
         }
         int j = 0;
         while (j < na && wcscmp(all[j].name, m[i].name)) j++;
-        if (j == na || all[j].pt.x != m[i].now.x || all[j].pt.y != m[i].now.y) moved_forget(m[i].name);
+        if (j == na || !icons_same_spot(all[j].pt, m[i].now)) moved_forget(m[i].name);
         else left++;
     }
     free(m);

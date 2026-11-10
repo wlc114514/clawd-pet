@@ -5,6 +5,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "pet.h"
+#include "ui.h"
 
 #define WALL_CLASS L"ClawdWall"
 #define DRAW_CLASS L"ClawdWallDraw"
@@ -45,15 +46,8 @@ static void paint(HWND hwnd, RECT r, int k, BYTE alpha)
     Canvas c = { lp, lw, lh };
     draw_wall(&c);
 
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = lw * k;
-    bi.bmiHeader.biHeight = -lh * k;   // top-down
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
     uint32_t *bits;
-    HBITMAP dib = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    HBITMAP dib = ui_dib(lw * k, lh * k, &bits);
     HDC dc = CreateCompatibleDC(NULL);
     HGDIOBJ old = SelectObject(dc, dib);
     cv_scale_premul(&c, bits, k);

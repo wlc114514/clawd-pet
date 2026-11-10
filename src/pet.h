@@ -202,6 +202,7 @@ void pet_cheer(Pet *p);
 void pet_flip(Pet *p);
 void pet_slide(Pet *p);
 void pet_sleep(Pet *p);
+void pet_wake(Pet *p);    // up again, if it is asleep
 void pet_leave(Pet *p);
 void pet_startle(Pet *p, double from_x);   // something scary happened at screen x from_x
 void pet_dress(Pet *p, const unsigned char *wear);   // new outfit (SLOTS entries)

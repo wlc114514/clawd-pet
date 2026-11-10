@@ -2,15 +2,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "ui.h"
 
 #define PK_CLASS   L"ClawdPicker"
-#define COL_INK    0xFF2B2B2Bu
-#define COL_PAPER  0xFFFFFFFFu
-#define COL_DIM    0xFFA8A8A8u
-#define COL_LINE   0xFFE6E1D6u
-#define COL_ACCENT 0xFFD77757u
-#define COL_HOT    0xFFC86A4Bu
-#define COL_PRESS  0xFFB25A3Cu
 
 /*
  * Layout at 96 dpi (scaled by D()):
@@ -58,19 +52,13 @@ static int D(int v)
 
 static void fill(uint32_t *px, int x0, int y0, int x1, int y1, uint32_t col)
 {
-    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < pk.H; y++)
-        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < pk.W; x++) px[y * pk.W + x] = col;
+    ui_fill(px, pk.W, pk.H, x0, y0, x1, y1, col);
 }
 
 // Chamfered box with a one-unit border, like the text bubbles.
 static void box(uint32_t *px, int x0, int y0, int x1, int y1, uint32_t border, uint32_t inside)
 {
-    int u = pk.u;
-    fill(px, x0 + u, y0, x1 - u, y0 + u, border);
-    fill(px, x0 + u, y1 - u, x1 - u, y1, border);
-    fill(px, x0, y0 + u, x0 + u, y1 - u, border);
-    fill(px, x1 - u, y0 + u, x1, y1 - u, border);
-    fill(px, x0 + u, y0 + u, x1 - u, y1 - u, inside);
+    ui_box(px, pk.W, pk.H, pk.u, x0, y0, x1, y1, border, inside);
 }
 
 static int snap(int v)
@@ -88,28 +76,11 @@ static int in_button(int x, int y)
     return x >= snap(D(16)) && x < pk.W - snap(D(16)) && y >= snap(D(BTN_TOP)) && y < snap(D(BTN_BOT));
 }
 
-static HFONT font(int size, int weight)
-{
-    return CreateFontW(-D(size), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
-                       0, 0, ANTIALIASED_QUALITY, 0, L"Microsoft YaHei UI");
-}
-
 // Draws s with its left edge at x (or centred on x), vertically centred on cy.
 // Returns the width.
 static int text(HDC dc, const wchar_t *s, int size, int weight, uint32_t col, int x, int cy, int center)
 {
-    HFONT f = font(size, weight), of = SelectObject(dc, f);
-    int n = (int)wcslen(s);
-    SIZE sz;
-    TEXTMETRICW tm;
-    GetTextExtentPoint32W(dc, s, n, &sz);
-    GetTextMetricsW(dc, &tm);
-    SetTextColor(dc, RGB((col >> 16) & 255, (col >> 8) & 255, col & 255));
-    if (center) x -= sz.cx / 2;
-    TextOutW(dc, x, cy + (tm.tmAscent - tm.tmInternalLeading) / 2, s, n);
-    SelectObject(dc, of);
-    DeleteObject(f);
-    return sz.cx;
+    return ui_text(dc, s, D(size), weight, col, x, cy, center);
 }
 
 static void num_text(HDC dc, int v, int size, int weight, uint32_t col, int cx, int cy)
@@ -123,15 +94,8 @@ static void draw(POINT *pos)
 {
     int u = pk.u, W = pk.W, H = pk.H, BH = H - 2 * u;
     HDC dc = CreateCompatibleDC(NULL);
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = W;
-    bi.bmiHeader.biHeight = -H;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
     uint32_t *px;
-    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0), obmp = SelectObject(dc, bmp);
+    HBITMAP bmp = ui_dib(W, H, &px), obmp = SelectObject(dc, bmp);
     memset(px, 0, (size_t)W * H * 4);
 
     box(px, 0, 0, W, BH, COL_INK, COL_PAPER);
@@ -166,7 +130,7 @@ static void draw(POINT *pos)
         // The number stays centred; "分" hangs off its right side.
         wchar_t s[8];
         _snwprintf(s, 8, L"%d", w->val);
-        HFONT f = font(24, FW_BOLD), of = SelectObject(dc, f);
+        HFONT f = ui_font(D(24), FW_BOLD), of = SelectObject(dc, f);
         SIZE sz;
         GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
         SelectObject(dc, of);

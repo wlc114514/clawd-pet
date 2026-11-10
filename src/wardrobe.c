@@ -1,17 +1,12 @@
 #include "wardrobe.h"
 #include <stdint.h>
 #include <string.h>
+#include "pet.h"
+#include "ui.h"
 
 #define WD_CLASS   L"ClawdWardrobe"
-#define COL_INK    0xFF2B2B2Bu
-#define COL_PAPER  0xFFFFFFFFu
-#define COL_DIM    0xFFA8A8A8u
-#define COL_LINE   0xFFE6E1D6u
 #define COL_STAGE  0xFFF7F4EEu
 #define COL_WORN   0xFFFBEDE7u
-#define COL_ACCENT 0xFFD77757u
-#define COL_HOT    0xFFC86A4Bu
-#define COL_PRESS  0xFFB25A3Cu
 
 /*
  * Layout at 96 dpi (scaled by D()):
@@ -75,19 +70,13 @@ static int S(int v)   // scaled and on the border grid
 
 static void fill(uint32_t *px, int x0, int y0, int x1, int y1, uint32_t col)
 {
-    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < wd.H; y++)
-        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < wd.W; x++) px[y * wd.W + x] = col;
+    ui_fill(px, wd.W, wd.H, x0, y0, x1, y1, col);
 }
 
 // Chamfered box with a one-unit border, like the text bubbles.
 static void box(uint32_t *px, int x0, int y0, int x1, int y1, uint32_t border, uint32_t inside)
 {
-    int u = wd.u;
-    fill(px, x0 + u, y0, x1 - u, y0 + u, border);
-    fill(px, x0 + u, y1 - u, x1 - u, y1, border);
-    fill(px, x0, y0 + u, x0 + u, y1 - u, border);
-    fill(px, x1 - u, y0 + u, x1, y1 - u, border);
-    fill(px, x0 + u, y0 + u, x1 - u, y1 - u, inside);
+    ui_box(px, wd.W, wd.H, wd.u, x0, y0, x1, y1, border, inside);
 }
 
 // Part of a canvas (sx, sy, sw by sh), each pixel k by k, onto opaque px at (x, y).
@@ -105,14 +94,6 @@ static void blit(uint32_t *px, const Canvas *c, int sx, int sy, int sw, int sh, 
                     px[yy * wd.W + xx] = out;
                 }
         }
-}
-
-static Pose stand(void)
-{
-    Pose q = { 0 };
-    q.eyes = EYE_OPEN;
-    for (int i = 0; i < 4; i++) q.legs[i] = 2;
-    return q;
 }
 
 /* ---- layout ----------------------------------------------------------- */
@@ -162,34 +143,17 @@ static int hit(int x, int y)
 
 /* ---- drawing ---------------------------------------------------------- */
 
-static HFONT font(int size, int weight)
-{
-    return CreateFontW(-D(size), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
-                       0, 0, ANTIALIASED_QUALITY, 0, L"Microsoft YaHei UI");
-}
-
 // Draws s (UTF-8) with its left edge at x (or centred on x), vertically centred on cy.
 static void text(HDC dc, const char *s, int size, int weight, uint32_t col, int x, int cy, int center)
 {
     wchar_t w[32];
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, w, 32) - 1;
-    if (n <= 0) return;
-    HFONT f = font(size, weight), of = SelectObject(dc, f);
-    SIZE sz;
-    TEXTMETRICW tm;
-    GetTextExtentPoint32W(dc, w, n, &sz);
-    GetTextMetricsW(dc, &tm);
-    SetTextColor(dc, RGB((col >> 16) & 255, (col >> 8) & 255, col & 255));
-    if (center) x -= sz.cx / 2;
-    TextOutW(dc, x, cy + (tm.tmAscent - tm.tmInternalLeading) / 2, w, n);
-    SelectObject(dc, of);
-    DeleteObject(f);
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, 32) > 1) ui_text(dc, w, D(size), weight, col, x, cy, center);
 }
 
 // What the preview shows this tick: blinking now and then, looking about.
 static Pose preview_pose(void)
 {
-    Pose q = stand();
+    Pose q = pose_stand();
     static const int looks[4] = { 0, 1, 0, -1 };
     q.look = looks[(wd.tick / 50) % 4];
     if (wd.tick % 70 < 3) q.eyes = EYE_CLOSED;
@@ -228,7 +192,7 @@ static void draw_icon(uint32_t *px, int a, const RECT *r)
 {
     static uint32_t lp[CW * CH];
     Canvas c = { lp, CW, CH };
-    Pose q = stand();
+    Pose q = pose_stand();
     q.wear[acc_slot(a)] = (unsigned char)a;
 
     // Its size, over both frames of any animation.
@@ -262,15 +226,8 @@ static void draw(POINT *pos)
 {
     int u = wd.u, W = wd.W, H = wd.H, BH = H - 2 * u;
     HDC dc = CreateCompatibleDC(NULL);
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = W;
-    bi.bmiHeader.biHeight = -H;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
     uint32_t *px;
-    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0), obmp = SelectObject(dc, bmp);
+    HBITMAP bmp = ui_dib(W, H, &px), obmp = SelectObject(dc, bmp);
     memset(px, 0, (size_t)W * H * 4);
 
     box(px, 0, 0, W, BH, COL_INK, COL_PAPER);

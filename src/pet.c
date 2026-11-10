@@ -80,6 +80,7 @@ enum { IC_WALK, IC_UP, IC_GRAB, IC_PUT, IC_DOWN, IC_SHOCK };   // Pet.icon_ph
 // the top of the head (SPR_OY) down to the feet (FOOT_Y).
 #define BOX_L (SPR_OX + 1)
 #define BOX_R (SPR_OX + 17)
+#define MID_X (SPR_OX + 9)   // the middle of the sprite
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -98,7 +99,7 @@ static int rr(Pet *p, int lo, int hi)
 
 // Physics constants are tuned for scale 4 and scaled from there.
 static double unit(const Pet *p) { return p->scale / 4.0; }
-static double mid_x(const Pet *p) { return p->x + (SPR_OX + 9) * p->scale; }
+static double mid_x(const Pet *p) { return p->x + MID_X * p->scale; }
 static double feet_y(const Pet *p) { return p->y + FOOT_Y * p->scale; }
 /* ---- walls ------------------------------------------------------------ */
 
@@ -202,13 +203,8 @@ static int bump_head(Pet *p, double head_was)
     }
     return 0;
 }
-static double min_x(const Pet *p) { return p->area.left - (SPR_OX + 1) * p->scale; }
-static double max_x(const Pet *p) { return p->area.right - (SPR_OX + 17) * p->scale; }
-
-static DWORD idle_ms(void)
-{
-    return plat_idle_ms();
-}
+static double min_x(const Pet *p) { return p->area.left - BOX_L * p->scale; }
+static double max_x(const Pet *p) { return p->area.right - BOX_R * p->scale; }
 
 static void refresh_area(Pet *p)
 {
@@ -227,10 +223,23 @@ static void set_state(Pet *p, int st, int dur)
     p->spin = 0;
 }
 
-static void start_flip(Pet *p)
+// Stands still, and no longer after the mouse.
+static void stop(Pet *p)
 {
     p->vx = p->vy = 0;
     p->following = 0;
+}
+
+// The same, and it is not asleep because it was told to be.
+static void halt(Pet *p)
+{
+    stop(p);
+    p->forced_sleep = 0;
+}
+
+static void start_flip(Pet *p)
+{
+    stop(p);
     set_state(p, ST_FLIP, 0);
 }
 
@@ -239,8 +248,7 @@ static void start_slide(Pet *p, int dir)
 {
     double room_l = p->x - min_x(p), room_r = max_x(p) - p->x;
     p->dir = dir ? dir : room_r > room_l ? 1 : -1;
-    p->vx = p->vy = 0;
-    p->following = 0;
+    stop(p);
     set_state(p, ST_SLIDE, 0);
 }
 
@@ -255,9 +263,7 @@ static int on_toast(const Pet *p)
 static void start_toast(Pet *p)
 {
     p->dir = mid_x(p) < (g_toast.left + g_toast.right) / 2.0 ? 1 : -1;
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     p->toast_ph = 0;
     set_state(p, ST_TOAST, 0);
 }
@@ -271,6 +277,18 @@ static int is_free(int st)
 static int is_social(int st)
 {
     return st >= ST_GREET;
+}
+
+// On its feet and not too busy for a click, a cheer, a trick.
+static int can_react(const Pet *p)
+{
+    return is_free(p->state) || p->state == ST_LAND || is_social(p->state);
+}
+
+// The user is away and Claude Code has nothing on: time for a nap.
+static int dozy(const World *w)
+{
+    return w->cc == CLAUDE_IDLE && plat_idle_ms() > SLEEP_AFTER_MS;
 }
 
 static void clamp_walls(Pet *p, double bounce)
@@ -391,7 +409,7 @@ static double step_top(const Pet *p, int i)
 // is already perched on) that its head and bubbles would leave the screen.
 static int stairs_room(const Pet *p, int dir)
 {
-    double k = p->scale, c = p->x + (SPR_OX + 9) * k, floor = p->y + FOOT_Y * k;
+    double k = p->scale, c = p->x + MID_X * k, floor = p->y + FOOT_Y * k;
     double room = dir > 0 ? p->area.right - 8 * k - c : c - (p->area.left + 8 * k);
     int n = room > 0 ? (int)(room / (STEP_W * k)) : 0;
     double rise = (p->area.bottom - p->area.top) / 2.0;
@@ -442,11 +460,16 @@ static void stairs_update(Pet *p)
 
 /* ---- poses ------------------------------------------------------------ */
 
+static void set_legs(Pose *q, int len)
+{
+    for (int i = 0; i < 4; i++) q->legs[i] = len;
+}
+
 Pose pose_stand(void)
 {
     Pose q = { 0 };
     q.eyes = EYE_OPEN;
-    for (int i = 0; i < 4; i++) q.legs[i] = 2;
+    set_legs(&q, 2);
     return q;
 }
 
@@ -503,7 +526,7 @@ static Pose pose_land(int hard)
     q.body_dy = 1;
     q.squash = 1;
     q.eyes = hard ? EYE_CLOSED : EYE_OPEN;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     return q;
 }
 
@@ -513,7 +536,7 @@ static Pose pose_sleep(int breath)
     q.body_dy = 2;
     q.squash = breath;
     q.eyes = EYE_CLOSED;
-    for (int i = 0; i < 4; i++) q.legs[i] = 0;
+    set_legs(&q, 0);
     return q;
 }
 
@@ -533,7 +556,7 @@ static Pose pose_type(int tap)
     Pose q = pose_stand();
     q.body_dy = 1;
     q.prop = PROP_KEYBOARD;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     if (tap < 0) q.arm_l = -2;
     if (tap > 0) q.arm_r = -2;
     return q;
@@ -559,7 +582,7 @@ static Pose pose_shiver(void)
     q.body_dy = 1;
     q.squash = 1;
     q.arm_l = q.arm_r = 1;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     return q;
 }
 
@@ -571,7 +594,7 @@ static Pose pose_cry(int t)
     q.arm_l = q.arm_r = 1;
     if ((t / 5) % 2) {
         q.body_dy = 1;
-        for (int i = 0; i < 4; i++) q.legs[i] = 1;
+        set_legs(&q, 1);
     }
     return q;
 }
@@ -596,7 +619,7 @@ static Pose pose_startle(int look)
     q.stretch_x = -3 * look;
     q.arm_l = q.arm_r = -4;
     q.look = look;
-    for (int i = 0; i < 4; i++) q.legs[i] = 3;
+    set_legs(&q, 3);
     return q;
 }
 
@@ -612,7 +635,7 @@ static Pose pose_slide(int dir)
     q.stretch_x = -dir;
     if (dir > 0) q.arm_l = -3, q.arm_r = -1;
     else q.arm_r = -3, q.arm_l = -1;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     return q;
 }
 
@@ -626,7 +649,7 @@ static Pose pose_splat(int side)
     q.body_dy = 1;
     if (side > 0) q.arm_r = -3;
     else q.arm_l = -3;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     return q;
 }
 
@@ -638,7 +661,7 @@ static Pose pose_dazed(int t)
     q.body_dy = 1;
     q.arm_l = q.arm_r = 1;
     q.look = (t / 6) % 2 ? 1 : -1;
-    for (int i = 0; i < 4; i++) q.legs[i] = 1;
+    set_legs(&q, 1);
     return q;
 }
 
@@ -658,7 +681,7 @@ static Pose pose_desk(int prop, int frame)
     q.body_dy = DESK_DY;
     q.prop = prop;
     q.prop_frame = frame;
-    for (int i = 0; i < 4; i++) q.legs[i] = 0;
+    set_legs(&q, 0);
     q.arm_l = q.arm_r = prop == PROP_BOOK ? 1 : 2;
     return q;
 }
@@ -760,7 +783,7 @@ void pet_set_scale(Pet *p, int scale)
 
 POINT pet_head(const Pet *p)
 {
-    POINT h = { (LONG)(p->x + (SPR_OX + 9) * p->scale),
+    POINT h = { (LONG)(p->x + MID_X * p->scale),
                 (LONG)(p->y + (SPR_OY - 2 - acc_above(p->wear) + (p->desk ? DESK_DY : 0)) * p->scale) };
     return h;
 }
@@ -865,7 +888,7 @@ int pet_catch(Pet *p, POINT at)
 {
     if (!airborne(p)) return 0;
     pet_begin_drag(p, at);
-    p->drag_dx = (SPR_OX + 9) * p->scale;   // caught by the head, wherever the click was
+    p->drag_dx = MID_X * p->scale;   // caught by the head, wherever the click was
     p->drag_dy = (SPR_OY + 2) * p->scale;
     return 1;
 }
@@ -873,9 +896,7 @@ int pet_catch(Pet *p, POINT at)
 // Focus mode: sits down at its desk right where it is.
 static void sit_down(Pet *p)
 {
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     if (!p->desk && !p->desk_left) p->desk_job = rr(p, 0, 1) ? PROP_BOOK : PROP_HOMEWORK;   // back: as it was
     p->desk = 1;
     p->desk_left = 0;   // and if it couldn't get back to that one, it is gone
@@ -884,6 +905,15 @@ static void sit_down(Pet *p)
     p->desk_y = feet_y(p);
     p->count = 0;
     set_state(p, ST_DESK, rr(p, 60, 300));   // dur: when the page turns, or the writing starts
+}
+
+// Straight up in the air, taking off at vy (scale 4).
+static void hop(Pet *p, double vy)
+{
+    p->vx = 0;
+    p->vy = -vy * unit(p);
+    p->following = 0;
+    set_state(p, ST_JUMP, 0);
 }
 
 void pet_click(Pet *p)
@@ -904,28 +934,25 @@ void pet_click(Pet *p)
         p->vx = 0;
         p->vy = -10 * u;
         set_state(p, ST_FALL, 0);
-    } else if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) {
+    } else if (can_react(p)) {
         if (rr(p, 0, 4) == 0) {   // showing off
             start_flip(p);
             return;
         }
         if (rr(p, 0, 4)) say(p, G_HEART, C_HEART);
         else say(p, G_QUEST, C_WHITE);
-        p->vx = 0;
-        p->vy = -11 * u;
-        p->following = 0;
-        set_state(p, ST_JUMP, 0);
+        hop(p, 11);
     }
 }
 
 void pet_flip(Pet *p)
 {
-    if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) start_flip(p);
+    if (can_react(p)) start_flip(p);
 }
 
 void pet_slide(Pet *p)
 {
-    if (is_free(p->state) || p->state == ST_LAND || is_social(p->state)) start_slide(p, 0);
+    if (can_react(p)) start_slide(p, 0);
 }
 
 void pet_cheer(Pet *p)
@@ -934,16 +961,13 @@ void pet_cheer(Pet *p)
         p->count = 24;
         return;
     }
-    if (!is_free(p->state) && p->state != ST_LAND && !is_social(p->state)) return;
+    if (!can_react(p)) return;
     if (rr(p, 0, 2) == 0) {
         start_flip(p);
         return;
     }
     say(p, G_HEART, C_HEART);
-    p->vx = 0;
-    p->vy = -11 * unit(p);
-    p->following = 0;
-    set_state(p, ST_JUMP, 0);
+    hop(p, 11);
 }
 
 void pet_sleep(Pet *p)
@@ -951,6 +975,13 @@ void pet_sleep(Pet *p)
     if (p->state == ST_DRAG || p->state == ST_LEAVE || p->state == ST_CLIMB || p->state == ST_ICON) return;
     p->forced_sleep = 1;
     set_state(p, ST_SLEEP, 0);
+}
+
+void pet_wake(Pet *p)
+{
+    if (p->state != ST_SLEEP) return;
+    p->forced_sleep = 0;
+    set_state(p, ST_WAKE, 40);
 }
 
 void pet_leave(Pet *p)
@@ -1021,15 +1052,13 @@ void pet_climb(Pet *p)
     s->scale = p->scale;
     s->crumble_t = -1;
     p->y = ground_y(p);
-    s->x0 = p->x + (SPR_OX + 9) * k + dir * 5 * k;
+    s->x0 = p->x + MID_X * k + dir * 5 * k;
     s->base = p->y + FOOT_Y * k;   // the taskbar, a wall, or the height it already climbed to
     for (int i = 0; i < n; i++) s->off[i] = (i + 1) * STEP_H;
     s->shown = 1;
 
     p->dir = p->look = dir;
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     p->climb_i = 0;
     p->climb_ph = 0;
     set_state(p, ST_CLIMB, 8);
@@ -1093,7 +1122,7 @@ int pet_desk(const Pet *p, Canvas *c, POINT *origin)
     cv_clear(c);
     if (p->paper) draw_paper(c, SPR_OX, SPR_OY + DESK_DY);   // sitting up behind it, as the pet would
     draw_desk(c, SPR_OX, SPR_OY, PROP_DESK, 0);
-    origin->x = (LONG)floor(p->seat_x + 0.5) - (SPR_OX + 9) * k;
+    origin->x = (LONG)floor(p->seat_x + 0.5) - MID_X * k;
     origin->y = (LONG)floor(p->desk_y + 0.5) - FOOT_Y * k;
     return k;
 }
@@ -1319,7 +1348,7 @@ static int zig_go(Pet *p, int dir, Pose *q)
 {
     Zig *z = &p->zig;
     int to = p->stop + dir;
-    double k = z->scale, tx = stop_x(p, to) - (SPR_OX + 9) * k, ty = stop_y(p, to) - FOOT_Y * k;
+    double k = z->scale, tx = stop_x(p, to) - MID_X * k, ty = stop_y(p, to) - FOOT_Y * k;
     if (p->climb_ph == 0) {   // off: on the way up the slab after next starts coming up
         p->hop_x = p->x;
         p->hop_y = p->y;
@@ -1351,11 +1380,17 @@ static int zig_go(Pet *p, int dir, Pose *q)
     return 1;
 }
 
+// The canvas row of the very top of it as it is now, hat and all.
+static int head_row(const Pet *p)
+{
+    const Pose *q = &p->pose;
+    return SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0) - acc_above(p->wear);
+}
+
 // Where the icon's picture goes when it is held up over the pet's head.
 static POINT overhead(const Pet *p)
 {
-    const Pose *q = &p->pose;
-    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0) - acc_above(p->wear);
+    int top = head_row(p);
     POINT a = { (LONG)floor(mid_x(p) - p->job.size / 2.0 + 0.5),
                 (LONG)floor(p->y + (top - 1) * p->scale - p->job.size + 0.5) };
     if (a.y < p->screen.top) a.y = p->screen.top;
@@ -1514,9 +1549,7 @@ int pet_fetch(Pet *p, const IconJob *j)
     p->holding = 0;
     p->hurry = 1;
     p->goal_x = stop_x(p, 0);
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     p->y = p->area.bottom - FOOT_Y * p->scale;
     p->icon_ph = IC_WALK;
     set_state(p, ST_ICON, 0);
@@ -1530,9 +1563,7 @@ void pet_caught(Pet *p)
     if (s == ST_ICON ? p->icon_ph == IC_SHOCK : !is_free(s) && s != ST_LAND && s != ST_TO_DESK) return;
     if (s == ST_ICON && p->job.kind != JOB_NONE && p->job.status == JOB_ON) p->job.status = JOB_CAUGHT;
     p->holding = 0;
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     p->icon_ph = IC_SHOCK;
     say(p, G_EXCL, C_EXCL);
     set_state(p, ST_ICON, 0);
@@ -1550,9 +1581,7 @@ void pet_whip(Pet *p)
 // pet that hit one in the air can skip straight to seeing stars.
 static void start_bump(Pet *p, int side, int t)
 {
-    p->vx = p->vy = 0;
-    p->following = 0;
-    p->forced_sleep = 0;
+    halt(p);
     p->bump_side = side;
     p->buddy = 0;   // free for someone to come and comfort it
     p->count = 0;
@@ -1561,6 +1590,47 @@ static void start_bump(Pet *p, int side, int t)
     p->hop_y = p->y;
     set_state(p, ST_BUMP, 0);
     p->t = t;
+}
+
+// Walked, slid or skidded into a wall on side `hit`: flat against it.
+static Pose splat(Pet *p, int hit)
+{
+    spawn_bonk(p, hit);
+    start_bump(p, hit, 0);
+    return pose_splat(hit);
+}
+
+// A tick of a slide: running up to it, or sliding along in a cloud of dust.
+static Pose slide_step(Pet *p, int run, int blinking)
+{
+    Pose q;
+    if (run) {
+        q = pose_walk((p->t / 2) % 4, p->dir);
+        if (blinking) q.eyes = EYE_CLOSED;
+    } else {
+        q = pose_slide(p->dir);
+        if (p->t % 3 == 0) spawn_dust(p);
+    }
+    p->t++;
+    return q;
+}
+
+// Real keystrokes drive the arms; for Claude Code we fake a steady patter.
+static void tap_keys(Pet *p, const World *w)
+{
+    if (w->keys > 0 || (w->cc == CLAUDE_WORKING && !w->typing && rr(p, 0, 3) == 0)) {
+        p->tap_side = p->tap_side > 0 ? -1 : 1;
+        p->tap_t = 3;
+    }
+}
+
+// Off the floor it climbed up to, back down to the taskbar.
+static void jump_down(Pet *p)
+{
+    p->perch = 0;
+    p->vx = p->dir * 2 * unit(p);
+    p->vy = -9 * unit(p);
+    set_state(p, ST_JUMP, 0);
 }
 
 void pet_update(Pet *p, const World *w)
@@ -1608,7 +1678,7 @@ void pet_update(Pet *p, const World *w)
 
     // Cursor relative to the pet: horizontal offset from the sprite centre,
     // and height above the floor it stands on.
-    double dxm = w->cursor.x - (p->x + (SPR_OX + 9) * p->scale);
+    double dxm = w->cursor.x - (p->x + MID_X * p->scale);
     double dym = gy + FOOT_Y * p->scale - w->cursor.y;
     int cursor_live = w->cursor_still_ms < 3000;
     int hover = fabs(dxm) < 9 * p->scale && dym >= 0 && dym < 12 * p->scale;
@@ -1616,11 +1686,8 @@ void pet_update(Pet *p, const World *w)
     if (is_free(p->state)) {
         int want = -1;
         if (w->focus && p->perch && !p->paused) {   // down from up there first
-            p->perch = 0;
-            p->vx = p->dir * 2 * u;
-            p->vy = -9 * u;
             p->following = 0;
-            set_state(p, ST_JUMP, 0);
+            jump_down(p);
         } else if (w->focus)   // to its desk, once pets_together() has found it a seat
             want = p->seat == SEAT_NONE ? -1
                  : p->seat == SEAT_AT && fabs(p->seat_x - mid_x(p)) > 2 ? ST_TO_DESK : ST_DESK;
@@ -1629,10 +1696,10 @@ void pet_update(Pet *p, const World *w)
         else if (w->cc == CLAUDE_WAITING)
             want = ST_WAVE;
         else if (w->heat > 1)   // too hot to roam: stay put by the fan
-            want = w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS ? ST_SLEEP : ST_IDLE;
+            want = dozy(w) ? ST_SLEEP : ST_IDLE;
         else if (w->mouse_mode == MOUSE_SHY && cursor_live && fabs(dxm) < 140 * u && dym > -20 * u && dym < 160 * u)
             want = ST_FLEE;
-        else if (w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS && !on_toast(p))   // awake up there
+        else if (dozy(w) && !on_toast(p))   // awake up there
             want = ST_SLEEP;
 
         if (want == ST_DESK) {
@@ -1691,10 +1758,7 @@ void pet_update(Pet *p, const World *w)
         if (++p->t >= p->dur) {
             if (p->perch && plat_ticks_ms() >= p->perch_until) {   // seen enough: jump down
                 say(p, G_HEART, C_HEART);
-                p->perch = 0;
-                p->vx = p->dir * 2 * u;
-                p->vy = -9 * u;
-                set_state(p, ST_JUMP, 0);
+                jump_down(p);
                 break;
             }
             if (w->heat > 1) {   // no wandering off from the fan
@@ -1737,9 +1801,7 @@ void pet_update(Pet *p, const World *w)
         if (p->following) p->dir = dxm > 0 ? 1 : -1;
         int hit = move_x(p, p->dir * speed);
         if (hit) {
-            spawn_bonk(p, hit);
-            start_bump(p, hit, 0);
-            q = pose_splat(hit);
+            q = splat(p, hit);
             break;
         }
         if (!p->following) {
@@ -1801,17 +1863,10 @@ void pet_update(Pet *p, const World *w)
                 q = pose_land(0);
                 break;
             }
-            if (run) {
-                q = pose_walk((p->t / 2) % 4, p->dir);
-                if (blinking) q.eyes = EYE_CLOSED;
-            } else {
-                q = pose_slide(p->dir);
-                if (p->t % 3 == 0) spawn_dust(p);
-            }
-            p->t++;
+            q = slide_step(p, run, blinking);
         } else {                  // the leap, landing on the popup wherever it has got to
             double f = (double)++p->t / TOAST_HOP;
-            double tx = to - (SPR_OX + 9) * k, ty = g_toast.top - FOOT_Y * k;
+            double tx = to - MID_X * k, ty = g_toast.top - FOOT_Y * k;
             p->x = p->hop_x + (tx - p->hop_x) * f;
             p->y = p->hop_y + (ty - p->hop_y) * f - 24 * k * f * (1 - f);
             q = pose_hop(f < 0.5);
@@ -1832,9 +1887,7 @@ void pet_update(Pet *p, const World *w)
         else p->vx *= 1 - SLIDE_DRAG;
         int hit = move_x(p, p->vx);
         if (hit && fabs(p->vx) > 4 * u) {   // straight into a wall
-            spawn_bonk(p, hit);
-            start_bump(p, hit, 0);
-            q = pose_splat(hit);
+            q = splat(p, hit);
             break;
         }
         int edge = p->dir < 0 ? p->x <= min_x(p) : p->x >= max_x(p);   // the edge it is heading for
@@ -1846,14 +1899,7 @@ void pet_update(Pet *p, const World *w)
             q.eyes = EYE_HAPPY;
             break;
         }
-        if (run) {
-            q = pose_walk((p->t / 2) % 4, p->dir);
-            if (blinking) q.eyes = EYE_CLOSED;
-        } else {
-            q = pose_slide(p->dir);
-            if (p->t % 3 == 0) spawn_dust(p);
-        }
-        p->t++;
+        q = slide_step(p, run, blinking);
         break;
     }
 
@@ -1881,11 +1927,7 @@ void pet_update(Pet *p, const World *w)
     }
 
     case ST_TYPE:
-        // Real keystrokes drive the arms; for Claude Code we fake a steady patter.
-        if (w->keys > 0 || (w->cc == CLAUDE_WORKING && !w->typing && rr(p, 0, 3) == 0)) {
-            p->tap_side = p->tap_side > 0 ? -1 : 1;
-            p->tap_t = 3;
-        }
+        tap_keys(p, w);
         q = pose_type(p->tap_t > 0 ? p->tap_side : 0);
         if (p->tap_t > 0) p->tap_t--;
         if (p->wear[SLOT_HEAD] == ACC_PHONES) q.squash = (p->t / 6) % 2;   // nodding along to the music
@@ -1915,12 +1957,9 @@ void pet_update(Pet *p, const World *w)
 
     case ST_DESK: {
         int since = p->t - p->dur;   // into what it does now and then
-        int dozing = w->cc == CLAUDE_IDLE && idle_ms() > SLEEP_AFTER_MS;
+        int dozing = dozy(w);
         if (p->typist && (w->cc == CLAUDE_WORKING || w->typing)) {   // on the laptop, keys as in ST_TYPE
-            if (w->keys > 0 || (w->cc == CLAUDE_WORKING && !w->typing && rr(p, 0, 3) == 0)) {
-                p->tap_side = p->tap_side > 0 ? -1 : 1;
-                p->tap_t = 3;
-            }
+            tap_keys(p, w);
             q = pose_desk(PROP_LAPTOP, 0);
             if (p->tap_t > 0) {
                 if (p->tap_side < 0) q.arm_l = 0;
@@ -2027,7 +2066,7 @@ void pet_update(Pet *p, const World *w)
             q.eyes = EYE_HAPPY;
             q.look = p->dir;
             q.arm_l = q.arm_r = -3;
-            for (int i = 0; i < 4; i++) q.legs[i] = 1;
+            set_legs(&q, 1);
             double f = (double)(++p->t - FLIP_CROUCH) / (2 * FLIP_VY);
             p->spin = -p->dir * 6.283185307179586 * (f < 1 ? f : 1);
         }
@@ -2061,9 +2100,7 @@ void pet_update(Pet *p, const World *w)
         {
             int hit = move_x(p, p->vx);
             if (hit && fabs(p->vx) > 4 * u) {   // skidded into a wall
-                spawn_bonk(p, hit);
-                start_bump(p, hit, 0);
-                q = pose_splat(hit);
+                q = splat(p, hit);
                 break;
             }
             if (hit) p->vx = 0;
@@ -2092,7 +2129,7 @@ void pet_update(Pet *p, const World *w)
             }
         } else if (p->climb_ph == 1) {   // hop, one step up and along
             double f = (double)++p->t / HOP_TICKS;
-            double tx = step_cx(p, i) - (SPR_OX + 9) * k, ty = step_top(p, i) - FOOT_Y * k;
+            double tx = step_cx(p, i) - MID_X * k, ty = step_top(p, i) - FOOT_Y * k;
             p->x = p->hop_x + (tx - p->hop_x) * f;
             p->y = p->hop_y + (ty - p->hop_y) * f - 16 * k * f * (1 - f);
             q = pose_hop(f < 0.5);
@@ -2258,9 +2295,7 @@ void pet_update(Pet *p, const World *w)
             p->dir = d > 0 ? 1 : -1;
             int hit = move_x(p, p->dir * fmin(fabs(d), 2.6 * u));
             if (hit) {
-                spawn_bonk(p, hit);
-                start_bump(p, hit, 0);
-                q = pose_splat(hit);
+                q = splat(p, hit);
                 break;
             }
             clamp_walls(p, 0);
@@ -2306,7 +2341,7 @@ void pet_update(Pet *p, const World *w)
         q = pose_sleep((p->t / 40) % 2);
         if (p->t % 45 == 0) spawn_z(p);
         p->t++;
-        if (!p->forced_sleep && idle_ms() < 1000) set_state(p, ST_WAKE, 40);
+        if (!p->forced_sleep && plat_idle_ms() < 1000) set_state(p, ST_WAKE, 40);
         break;
 
     case ST_WAKE:
@@ -2390,7 +2425,7 @@ void pet_update(Pet *p, const World *w)
                 p->state == ST_SLEEP || p->state == ST_WAKE;
     int fan = w->heat > 1 && still;
     if (fan && !p->fan)
-        p->fan_side = p->x + (SPR_OX + 9) * p->scale < (p->area.left + p->area.right) / 2.0 ? 1 : -1;
+        p->fan_side = p->x + MID_X * p->scale < (p->area.left + p->area.right) / 2.0 ? 1 : -1;
     p->fan = fan;
     if (fan && ++p->fan_t % 7 == 0) spawn_wind(p);
 
@@ -2507,6 +2542,27 @@ static int in_wall(const Pet *p)
     return 0;
 }
 
+// Nearest to screen x first.
+static void sort_near(Pet **v, int n, double x)
+{
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && fabs(mid_x(v[j]) - x) < fabs(mid_x(v[j - 1]) - x); j--) {
+            Pet *t = v[j];
+            v[j] = v[j - 1];
+            v[j - 1] = t;
+        }
+}
+
+// c goes over to a, who is dazed, to pat it better.
+static void go_comfort(Pet *c, Pet *a)
+{
+    c->buddy = a->id;
+    c->role = GO_COMFORT;
+    c->following = 0;
+    set_state(c, ST_GOTO, 0);
+    a->buddy = c->id;
+}
+
 static void drop_out(Pet *p, ULONGLONG now)
 {
     p->buddy = 0;
@@ -2541,9 +2597,7 @@ static void knock_off(Pet *r, Pet *carrier)
 // Screen y for the feet of a pet standing on c's head (which bobs as it walks).
 static double ride_y(const Pet *c)
 {
-    const Pose *q = &c->pose;
-    int top = SPR_OY + q->body_dy + (q->squash > 0) - (q->squash < 0) - acc_above(c->wear);   // on top of the hat
-    return c->y + top * c->scale - FOOT_Y * c->scale;
+    return c->y + head_row(c) * c->scale - FOOT_Y * c->scale;
 }
 
 static void greet(Pet *a, Pet *b)
@@ -2581,7 +2635,6 @@ static int start_chase(Pet **ps, int n, Pet *a, ULONGLONG now)
             let_go(two[j]);
             two[j]->buddy = two[!j]->id;
             two[j]->role = j == 0;      // a is "it"
-            two[j]->following = 0;
             set_state(two[j], ST_CHASE, j == 0 ? 15 : 0);
         }
         a->count = rr(a, 2, 4);         // tags before they have had enough
@@ -2601,12 +2654,7 @@ static int start_line(Pet **ps, int n, Pet *a, ULONGLONG now)
         if (ps[i] != a && sociable(ps[i], now) && side_by_side(a, ps[i]) && within(a, ps[i], 1200))
             line[m++] = ps[i];
     if (!m) return 0;
-    for (int i = 1; i < m; i++)   // nearest first
-        for (int j = i; j > 0 && fabs(mid_x(line[j]) - mid_x(a)) < fabs(mid_x(line[j - 1]) - mid_x(a)); j--) {
-            Pet *t = line[j];
-            line[j] = line[j - 1];
-            line[j - 1] = t;
-        }
+    sort_near(line, m, mid_x(a));
     double pos = (mid_x(a) - a->area.left) / (double)(a->area.right - a->area.left);
     let_go(a);
     a->dir = pos < 0.5 ? 1 : -1;      // the side with more room
@@ -2618,7 +2666,6 @@ static int start_line(Pet **ps, int n, Pet *a, ULONGLONG now)
         let_go(p);
         p->buddy = (i ? line[i - 1] : a)->id;
         p->role = a->dir;
-        p->following = 0;
         p->social_at = now + SOCIAL_MS;
         set_state(p, ST_FOLLOW, 0);
     }
@@ -2639,11 +2686,9 @@ static int start_ride(Pet **ps, int n, Pet *a, ULONGLONG now)
         let_go(b);
         a->buddy = b->id;
         a->role = GO_RIDE;
-        a->following = 0;
         a->social_at = b->social_at = now + SOCIAL_MS;
         set_state(a, ST_GOTO, 0);
         b->carrying = a->id;
-        b->following = 0;
         set_state(b, ST_IDLE, 60);   // wait for it
         return 1;
     }
@@ -2660,9 +2705,7 @@ static int start_greet(Pet **ps, int n, Pet *a, ULONGLONG now)
         let_go(b);
         a->buddy = b->id;
         a->role = GO_GREET;
-        a->following = 0;
         set_state(a, ST_GOTO, 0);
-        b->following = 0;
         b->social_at = now + SOCIAL_MS;   // nobody else's game meanwhile
         set_state(b, ST_IDLE, 900);       // wait for it (as long as a GOTO may take)
         return 1;
@@ -2693,11 +2736,7 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
                 }
                 if (best) {
                     let_go(best);
-                    best->buddy = a->id;
-                    best->role = GO_COMFORT;
-                    best->following = 0;
-                    set_state(best, ST_GOTO, 0);
-                    a->buddy = best->id;
+                    go_comfort(best, a);
                 }
                 ok = 1;
                 break;
@@ -2705,12 +2744,7 @@ int pets_play(Pet **ps, int n, Pet *who, int what)
             int m = 0;   // the others, nearest first
             for (int j = 0; j < n; j++)
                 if (ps[j] != a) by[m++] = ps[j];
-            for (int j = 1; j < m; j++)
-                for (int k = j; k > 0 && fabs(mid_x(by[k]) - mid_x(a)) < fabs(mid_x(by[k - 1]) - mid_x(a)); k--) {
-                    Pet *t = by[k];
-                    by[k] = by[k - 1];
-                    by[k - 1] = t;
-                }
+            sort_near(by, m, mid_x(a));
             ok = what == PLAY_GREET ? start_greet(by, m, a, now)
                : what == PLAY_CHASE ? start_chase(by, m, a, now)
                : what == PLAY_LINE  ? start_line(by, m, a, now)
@@ -2761,16 +2795,11 @@ static void seat_pets(Pet **ps, int n)
     int m = 0;
     for (int i = 0; i < n && m < 16; i++)
         if (ready_to_sit(ps[i])) todo[m++] = ps[i];
-    for (int i = 1; i < m; i++)
-        for (int j = i; j > 0 && fabs(mid_x(todo[j]) - g_row_x) < fabs(mid_x(todo[j - 1]) - g_row_x); j--) {
-            Pet *t = todo[j];
-            todo[j] = todo[j - 1];
-            todo[j - 1] = t;
-        }
+    sort_near(todo, m, g_row_x);
     double gap = SEAT_GAP * g_row_scale;
     for (int i = 0; i < m; i++) {
         Pet *p = todo[i];
-        double lo = min_x(p) + (SPR_OX + 9) * p->scale, hi = max_x(p) + (SPR_OX + 9) * p->scale;
+        double lo = min_x(p) + MID_X * p->scale, hi = max_x(p) + MID_X * p->scale;
         p->seat = SEAT_HERE;
         p->seat_x = mid_x(p);
         if (p->paused || !in_row(p)) continue;
@@ -3083,13 +3112,7 @@ void pets_together(Pet **ps, int n, const World *w)
                     continue;
                 if (!best || fabs(mid_x(c) - mid_x(a)) < fabs(mid_x(best) - mid_x(a))) best = c;
             }
-            if (best) {
-                best->buddy = a->id;
-                best->role = GO_COMFORT;
-                best->following = 0;
-                set_state(best, ST_GOTO, 0);
-                a->buddy = best->id;
-            }
+            if (best) go_comfort(best, a);
         }
 
         // Sleeping: yawns are catching.

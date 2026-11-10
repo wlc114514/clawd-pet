@@ -23,6 +23,9 @@ int  icons_size(void);    // px of an icon's picture
 int  icons_list(DeskIcon *out, int max, const RECT *in);
 // Where the named icon is; 0 if there is none by that name.
 int  icons_find(const wchar_t *name, POINT *pt);
+// The same spot on the grid, give or take: when the screen changes, Explorer
+// lays the desktop out again and every icon ends up a pixel or two over.
+int  icons_same_spot(POINT a, POINT b);
 // Empty grid spots inside *in, in the same grid as the icons already there.
 int  icons_free_spots(POINT *out, int max, const RECT *in);
 // A handle on the named icon for moving it about; -1 if there is none.

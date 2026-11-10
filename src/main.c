@@ -4,7 +4,6 @@
 #include <shlobj.h>
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,10 +16,13 @@
 #include "version.h"
 #include "wall.h"
 #include "icons.h"
+#include "ui.h"
 
 #define WM_TRAY    (WM_APP + 1)
 #define WM_UPDATE  (WM_APP + 2)   // from update.c: wParam UPD_*, lParam manual
-#define TICK_MS    33
+// Timers go off on the system's 15.6 ms beat: 31 gets every second one of
+// those (32 a second), where 33 would wait for the third (21 a second).
+#define TICK_MS    31
 #define MAX_PETS   6
 #define APP_NAME   L"ClawdPet"
 #define HOST_CLASS L"ClawdPetHost"
@@ -39,8 +41,12 @@ enum {
     IDM_CLI, IDM_WALL_DRAW, IDM_WALL_CLEAR, IDM_WARDROBE,
     IDM_PLAY_GREET, IDM_PLAY_CHASE, IDM_PLAY_LINE, IDM_PLAY_RIDE, IDM_PLAY_DAZE,   // same order as PLAY_*
     IDM_FLIP, IDM_UPDATE_CHECK, IDM_UPDATE_INSTALL, IDM_FEAT_UPDATE, IDM_FOCUS, IDM_SLIDE,
-    IDM_FEAT_ICONS, IDM_ICONS_RESTORE, IDM_WHIP,
+    IDM_FEAT_ICONS, IDM_ICONS_RESTORE, IDM_WHIP, IDM_WAKE,
 };
+
+// What a text bubble is about (see bubble.h): SAY_ONCE is gone when its time
+// is up; the rest are reminders, kept until they have been seen.
+enum { SAY_ONCE, SAY_CC, SAY_POMO, SAY_WATER, SAY_UPDATE, SAY_WALL, SAY_ICONS, SAY_HELLO };
 
 // Claude Code hook events, sent by `clawd.exe --cc <name>`.
 enum { CC_EV_PROMPT = 1, CC_EV_TOOL, CC_EV_PERMISSION, CC_EV_STOP, CC_EV_END };
@@ -49,8 +55,8 @@ static const wchar_t *CC_EVENTS[] = { L"prompt", L"tool", L"permission", L"stop"
 static const int SIZE_PX[3] = { 3, 4, 6 };   // logical pixel size at 96 dpi
 static const int WATER_MIN[4] = { 0, 30, 45, 60 };
 
-// A click-through layered window for something drawn apart from a pet
-// (its stairs, the desk it left), from a canvas that grows as needed.
+// A layered window drawn from a canvas that grows as needed: a pet, or
+// something click-through drawn apart from it (its stairs, the desk it left).
 typedef struct {
     HWND hwnd;
     HDC dc;
@@ -66,12 +72,8 @@ typedef struct {
     HWND hwnd;
     Pet pet;
     TextBubble tb;
-    HDC memdc;
-    HBITMAP dib;
-    uint32_t *bits;
-    int dib_k, dirty, hidden;
-    POINT prev_pos;
-    uint32_t px[CW * CH], prev_px[CW * CH];
+    int hidden;
+    Layer body; // the pet itself, in hwnd
     Layer st;   // the stairs it is climbing
     Layer dk;   // focus mode: the desk it left (and a paper cut-out of itself sitting there)
     Layer ic;   // a picture of the desktop icon it is carrying
@@ -121,13 +123,28 @@ static ULONGLONG g_cursor_moved_at, g_last_key_at;
 static BYTE g_key_down[256];
 static HMONITOR g_fs_mon;
 static int g_pomo;                 // 0 off, 1 focus, 2 break
-static ULONGLONG g_pomo_end, g_water_next, g_cc_until;
+static ULONGLONG g_pomo_end, g_water_next;
+static int g_icons_told;           // has owned up once to what it does with the icons (kept)
+
+// Claude Code sessions heard from lately (several can be going at once), by
+// a number made from the session's id. g_cc is all of them taken together.
+#define MAX_SESSIONS 8
+typedef struct { unsigned id; int state; ULONGLONG until; } Session;
+static Session g_sess[MAX_SESSIONS];
+static int g_nsess;
 static int g_cc;
 
-static int scale_for(int size)
+static int scale_for(int size, UINT dpi)
 {
-    int s = (int)((SIZE_PX[size] * g_dpi + 48) / 96);
+    int s = (int)((SIZE_PX[size] * dpi + 48) / 96);
     return s < 1 ? 1 : s;
+}
+
+// The scaling of the screen pw is on.
+static UINT pet_dpi(const PetWin *pw)
+{
+    UINT dpi = GetDpiForWindow(pw->hwnd);
+    return dpi ? dpi : g_dpi;
 }
 
 /* ---- settings --------------------------------------------------------- */
@@ -201,6 +218,24 @@ static int is_cli_entry(const wchar_t *e, size_t n, const wchar_t *dir)
            (n == wcslen(dir) && !_wcsnicmp(e, dir, n));
 }
 
+// Is our folder one of the entries of `path`? With `rest`, every other
+// entry is copied there.
+static int path_scan(const wchar_t *path, const wchar_t *dir, wchar_t *rest)
+{
+    int found = 0;
+    for (const wchar_t *e = path; *e;) {
+        const wchar_t *semi = wcschr(e, L';');
+        size_t n = semi ? (size_t)(semi - e) : wcslen(e);
+        if (is_cli_entry(e, n, dir)) found = 1;
+        else if (n && rest) {
+            if (*rest) wcscat(rest, L";");
+            wcsncat(rest, e, n);
+        }
+        e += n + (semi != NULL);
+    }
+    return found;
+}
+
 // Adds or removes our folder in the user PATH, keeping every other entry.
 static int user_path_set(int add)
 {
@@ -209,17 +244,7 @@ static int user_path_set(int add)
     wchar_t *old = user_path_get();
     size_t cap = wcslen(old) + wcslen(CLI_DIR_RAW) + 2;
     wchar_t *out = calloc(cap, sizeof(wchar_t));
-    int found = 0;
-    for (wchar_t *e = old; *e;) {
-        wchar_t *semi = wcschr(e, L';');
-        size_t n = semi ? (size_t)(semi - e) : wcslen(e);
-        if (is_cli_entry(e, n, dir)) found = 1;
-        else if (n) {
-            if (*out) wcscat(out, L";");
-            wcsncat(out, e, n);
-        }
-        e += n + (semi != NULL);
-    }
+    int found = path_scan(old, dir, out);
     if (add) {
         if (*out) wcscat(out, L";");
         wcscat(out, CLI_DIR_RAW);
@@ -242,13 +267,7 @@ static int cli_enabled(void)
     cli_paths(dir, cmd);
     if (GetFileAttributesW(cmd) == INVALID_FILE_ATTRIBUTES) return 0;
     wchar_t *path = user_path_get();
-    int on = 0;
-    for (wchar_t *e = path; *e && !on;) {
-        wchar_t *semi = wcschr(e, L';');
-        size_t n = semi ? (size_t)(semi - e) : wcslen(e);
-        on = is_cli_entry(e, n, dir);
-        e += n + (semi != NULL);
-    }
+    int on = path_scan(path, dir, NULL);
     free(path);
     return on;
 }
@@ -297,62 +316,26 @@ static void cli_set(int on)
 
 /* ---- drawing ---------------------------------------------------------- */
 
-static HBITMAP make_dib(int w, int h, uint32_t **bits)
-{
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;   // top-down
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    return CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)bits, NULL, 0);
-}
-
-static void ensure_dib(PetWin *pw, int k)
-{
-    if (pw->dib && pw->dib_k == k) return;
-    uint32_t *bits;
-    HBITMAP dib = make_dib(CW * k, CH * k, &bits);
-    SelectObject(pw->memdc, dib);
-    if (pw->dib) DeleteObject(pw->dib);
-    pw->dib = dib;
-    pw->bits = bits;
-    pw->dib_k = k;
-    pw->dirty = 1;
-}
-
-static void present(PetWin *pw)
-{
-    int k = pw->pet.scale;
-    ensure_dib(pw, k);
-    Canvas cv = { pw->px, CW, CH };
-    pet_render(&pw->pet, &cv);
-
-    POINT pos = { (LONG)floor(pw->pet.x + 0.5), (LONG)floor(pw->pet.y + 0.5) };
-    if (!pw->dirty && pos.x == pw->prev_pos.x && pos.y == pw->prev_pos.y &&
-        !memcmp(pw->px, pw->prev_px, sizeof pw->px))
-        return;
-    pw->dirty = 0;
-    pw->prev_pos = pos;
-    memcpy(pw->prev_px, pw->px, sizeof pw->px);
-
-    cv_scale_premul(&cv, pw->bits, k);
-    SIZE sz = { CW * k, CH * k };
-    POINT src = { 0, 0 };
-    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    UpdateLayeredWindow(pw->hwnd, NULL, &pos, &sz, pw->memdc, &src, 0, &bf, ULW_ALPHA);
-}
-
 static void layer_destroy(Layer *l)
 {
     if (!l->hwnd) return;
     DestroyWindow(l->hwnd);
-    DeleteDC(l->dc);
+    if (l->dc) DeleteDC(l->dc);
     if (l->dib) DeleteObject(l->dib);
     l->hwnd = NULL;
     l->dc = NULL;
     l->dib = NULL;
+    l->w = 0;   // nothing drawn any more
+}
+
+// For good: the window and the canvas.
+static void layer_free(Layer *l)
+{
+    layer_destroy(l);
+    free(l->px);
+    free(l->prev);
+    l->px = l->prev = NULL;
+    l->cap = 0;
 }
 
 // Room for n logical pixels to draw into.
@@ -369,23 +352,13 @@ static uint32_t *layer_canvas(Layer *l, int n)
     return l->px;
 }
 
-// Shows cv (drawn into l->px) at pos, k screen px a logical one; k = 0
-// takes the window away. A new window goes just below `after`.
-static void layer_present(Layer *l, const Canvas *cv, int k, POINT pos, HWND after)
+// Puts cv (drawn into l->px) in l's window at pos, k screen px a logical
+// one, unless that is just what it shows already.
+static void layer_blit(Layer *l, const Canvas *cv, int k, POINT pos)
 {
-    if (!k) {
-        layer_destroy(l);
-        return;
-    }
-    int first = !l->hwnd;
-    if (first) {
-        l->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
-                                  WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
-                                  NULL, NULL, g_inst, NULL);
-        l->dc = CreateCompatibleDC(NULL);
-    }
-    if (first || cv->w != l->w || cv->h != l->h || k != l->k) {
-        HBITMAP dib = make_dib(cv->w * k, cv->h * k, &l->bits);
+    if (!l->dc) l->dc = CreateCompatibleDC(NULL);
+    if (cv->w != l->w || cv->h != l->h || k != l->k) {
+        HBITMAP dib = ui_dib(cv->w * k, cv->h * k, &l->bits);
         SelectObject(l->dc, dib);
         if (l->dib) DeleteObject(l->dib);
         l->dib = dib;
@@ -404,7 +377,31 @@ static void layer_present(Layer *l, const Canvas *cv, int k, POINT pos, HWND aft
     POINT src = { 0, 0 };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(l->hwnd, NULL, &pos, &sz, l->dc, &src, 0, &bf, ULW_ALPHA);
+}
+
+// Shows cv at pos in a click-through window of l's own; k = 0 takes the
+// window away. A new window goes just below `after`.
+static void layer_present(Layer *l, const Canvas *cv, int k, POINT pos, HWND after)
+{
+    if (!k) {
+        layer_destroy(l);
+        return;
+    }
+    int first = !l->hwnd;
+    if (first)
+        l->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                                  WS_EX_TRANSPARENT, L"ClawdStairs", L"", WS_POPUP, 0, 0, 1, 1,
+                                  NULL, NULL, g_inst, NULL);
+    layer_blit(l, cv, k, pos);
     if (first) SetWindowPos(l->hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+static void present(PetWin *pw)
+{
+    Canvas cv = { layer_canvas(&pw->body, CW * CH), CW, CH };
+    pet_render(&pw->pet, &cv);
+    POINT pos = { (LONG)floor(pw->pet.x + 0.5), (LONG)floor(pw->pet.y + 0.5) };
+    layer_blit(&pw->body, &cv, pw->pet.scale, pos);
 }
 
 static void layers_destroy(PetWin *pw)
@@ -462,6 +459,20 @@ static void present_catch(PetWin *pw)
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
+// An icon from a size x size picture (which it uses up), or a cursor with
+// its hotspot at (hot, hot).
+static HICON icon_from(HBITMAP color, int size, int cursor, int hot)
+{
+    void *zeros = calloc((size_t)((size + 15) / 16 * 2) * size, 1);
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, zeros);
+    ICONINFO ii = { !cursor, (DWORD)hot, (DWORD)hot, mask, color };
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(mask);
+    DeleteObject(color);
+    free(zeros);
+    return icon;
+}
+
 static HICON make_icon(int size)
 {
     // The sprite's visible part is 16x10 (x 1..16), so it fits a 16px icon exactly.
@@ -473,21 +484,14 @@ static HICON make_icon(int size)
     draw_clawd(&c, -1, 0, &q);
 
     uint32_t *bits;
-    HBITMAP color = make_dib(size, size, &bits);
+    HBITMAP color = ui_dib(size, size, &bits);
     memset(bits, 0, (size_t)size * size * 4);
     int ox = (size - 16 * k) / 2, oy = (size - 10 * k) / 2;
     for (int y = 0; y < 10 * k; y++)
         for (int x = 0; x < 16 * k; x++)
             bits[(oy + y) * size + ox + x] = lp[(y / k) * 16 + x / k];
 
-    void *zeros = calloc((size_t)((size + 15) / 16 * 2) * size, 1);
-    HBITMAP mask = CreateBitmap(size, size, 1, 1, zeros);
-    ICONINFO ii = { TRUE, 0, 0, mask, color };
-    HICON icon = CreateIconIndirect(&ii);
-    DeleteObject(mask);
-    DeleteObject(color);
-    free(zeros);
-    return icon;
+    return icon_from(color, size, 0, 0);
 }
 
 /* ---- pets ------------------------------------------------------------- */
@@ -496,18 +500,16 @@ static PetWin *spawn_pet(int drop_in)
 {
     if (g_npets >= MAX_PETS) return NULL;
     PetWin *pw = calloc(1, sizeof *pw);
-    pet_init(&pw->pet, scale_for(g_size), GetTickCount() ^ ((unsigned)g_npets * 0x9E3779B9u));
+    pet_init(&pw->pet, scale_for(g_size, g_dpi), GetTickCount() ^ ((unsigned)g_npets * 0x9E3779B9u));
     pw->pet.typist = !g_npets;   // only the first one types along
     pw->icon_h = -1;
     if (drop_in) pw->pet.y = pw->pet.area.top - CH * pw->pet.scale;   // falls from the sky
-    pw->prev_pos.x = pw->prev_pos.y = INT_MIN;
-    pw->dirty = 1;
-    pw->memdc = CreateCompatibleDC(NULL);
     pw->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                                APP_NAME, L"Clawd", WS_POPUP,
                                (int)pw->pet.x, (int)pw->pet.y, CW * pw->pet.scale, CH * pw->pet.scale,
                                NULL, NULL, g_inst, NULL);
     SetWindowLongPtrW(pw->hwnd, GWLP_USERDATA, (LONG_PTR)pw);
+    pw->body.hwnd = pw->hwnd;
     present(pw);
     ShowWindow(pw->hwnd, SW_SHOWNOACTIVATE);
     g_pets[g_npets++] = pw;
@@ -524,16 +526,24 @@ static int active_pets(void)
     return n;
 }
 
-// Send the newest pet away; it is destroyed once it has fallen off screen.
-// g_pets[0] (the talker) always stays.
-static void send_away_pet(void)
+// Sends pw away (NULL, from the tray: the newest); it is destroyed once it
+// has fallen off screen. g_pets[0] does the talking and the typing: if that
+// is the one to go, the next one staying takes its place.
+static void send_away(PetWin *pw)
 {
-    if (active_pets() <= 1) return;
-    for (int i = g_npets - 1; i > 0; i--)
-        if (g_pets[i]->pet.state != ST_LEAVE) {
-            pet_leave(&g_pets[i]->pet);
-            return;
-        }
+    if (active_pets() <= 1 || (pw && pw->pet.state == ST_LEAVE)) return;
+    int i = g_npets - 1;
+    if (pw) while (g_pets[i] != pw) i--;
+    else while (g_pets[i]->pet.state == ST_LEAVE) i--;
+    if (i == 0) {
+        for (i = 1; g_pets[i]->pet.state == ST_LEAVE;) i++;
+        PetWin *first = g_pets[0];
+        g_pets[0] = g_pets[i];
+        g_pets[i] = first;
+        g_pets[0]->pet.typist = 1;
+        first->pet.typist = 0;
+    }
+    pet_leave(&g_pets[i]->pet);
 }
 
 static void destroy_pet(int idx)
@@ -542,24 +552,20 @@ static void destroy_pet(int idx)
     if (g_press_pw == pw) g_press_pw = NULL;
     if (pw->pet.job.kind != JOB_NONE) job_end(pw);
     tb_destroy(&pw->tb);
-    layers_destroy(pw);
-    free(pw->st.px);
-    free(pw->st.prev);
-    free(pw->dk.px);
-    free(pw->dk.prev);
     if (pw->catch_hwnd) DestroyWindow(pw->catch_hwnd);
-    DestroyWindow(pw->hwnd);
-    DeleteDC(pw->memdc);
-    if (pw->dib) DeleteObject(pw->dib);
+    layer_free(&pw->st);
+    layer_free(&pw->dk);
+    layer_free(&pw->ic);
+    layer_free(&pw->body);   // and with it the pet's own window
     free(pw);
     memmove(&g_pets[idx], &g_pets[idx + 1], sizeof g_pets[0] * (size_t)(g_npets - idx - 1));
     g_npets--;
 }
 
 // The first Clawd does the talking; everyone cheers.
-static void announce(const wchar_t *text, DWORD ms, int cheer)
+static void announce(const wchar_t *text, DWORD ms, int cheer, int kind)
 {
-    if (g_npets) tb_show(&g_pets[0]->tb, text, ms);
+    if (g_npets) tb_show(&g_pets[0]->tb, text, ms, kind);
     if (cheer)
         for (int i = 0; i < g_npets; i++) pet_cheer(&g_pets[i]->pet);
 }
@@ -598,6 +604,8 @@ static HWND find_toast(RECT *r)
 
 static void sample_toast(void)
 {
+    static unsigned n;
+    if (!g_toast_hwnd && n++ % 8) return;   // none up: a look four times a second is plenty
     ULONGLONG now = GetTickCount64();
     RECT r;
     HWND h = find_toast(&r);
@@ -712,6 +720,29 @@ static int sample_heat(void)
     return level;
 }
 
+static int class_is(HWND h, const wchar_t *a, const wchar_t *b)
+{
+    wchar_t cls[32] = L"";
+    if (h) GetClassNameW(h, cls, 32);
+    return !wcscmp(cls, a) || !wcscmp(cls, b);
+}
+
+static int is_desktop(HWND h)
+{
+    return class_is(h, L"Progman", L"WorkerW");
+}
+
+static int is_taskbar(HWND h)
+{
+    return class_is(h, L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd");
+}
+
+// r covers all of s.
+static int covers(const RECT *r, const RECT *s)
+{
+    return r->left <= s->left && r->top <= s->top && r->right >= s->right && r->bottom >= s->bottom;
+}
+
 static int is_own_window(HWND h)
 {
     wchar_t cls[32];
@@ -726,16 +757,12 @@ static HMONITOR fullscreen_monitor(void)
 {
     HWND fg = GetForegroundWindow();
     if (!fg || is_own_window(fg)) return g_fs_mon;
-    wchar_t cls[32];
-    GetClassNameW(fg, cls, 32);
-    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd"))
-        return NULL;
+    if (is_desktop(fg) || is_taskbar(fg)) return NULL;
     RECT r;
     HMONITOR m = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof mi };
     if (!GetWindowRect(fg, &r) || !GetMonitorInfoW(m, &mi)) return NULL;
-    RECT s = mi.rcMonitor;
-    return r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom ? m : NULL;
+    return covers(&r, &mi.rcMonitor) ? m : NULL;
 }
 
 static HMONITOR pet_monitor(const Pet *p)
@@ -786,11 +813,6 @@ static void restack(PetWin *pw)
     if (pw->dk.hwnd) SetWindowPos(pw->dk.hwnd, pw->low ? HWND_TOPMOST : pw->hwnd, 0, 0, 0, 0, f);
 }
 
-static void set_sneak(PetWin *pw, int on)
-{
-    pw->sneak = on;
-}
-
 // Down on the desktop while it is up to something with icons; on top otherwise.
 static void update_low(PetWin *pw)
 {
@@ -813,6 +835,16 @@ static int jobs_of(int kind)
     int n = 0;
     for (int i = 0; i < g_npets; i++) n += g_pets[i]->pet.job.kind == kind;
     return n;
+}
+
+// Someone (other than `but`) is on the way to pt with an icon.
+static int spot_wanted(POINT pt, const PetWin *but)
+{
+    for (int i = 0; i < g_npets; i++) {
+        const IconJob *j = &g_pets[i]->pet.job;
+        if (g_pets[i] != but && j->kind != JOB_NONE && j->to.x == pt.x && j->to.y == pt.y) return 1;
+    }
+    return 0;
 }
 
 // A blank page with a folded corner, n x n: for an icon the shell has no picture of.
@@ -850,7 +882,7 @@ static int start_job(PetWin *pw, const IconJob *j, const wchar_t *name)
     wcsncpy(pw->icon_name, name, ICON_NAME - 1);
     pw->icon_name[ICON_NAME - 1] = 0;
     pw->icon_home = pw->icon_at = j->from;
-    if (j->sneak) set_sneak(pw, 1);
+    if (j->sneak) pw->sneak = 1;
     update_low(pw);   // under the windows right away, before anyone can "see" it there on top
     return 1;
 }
@@ -866,12 +898,7 @@ static int start_scatter(PetWin *pw, int sneak)
     for (int i = 0; i < ni; i++)   // not one someone else has
         if (icon_busy(icons[i].name)) icons[i--] = icons[--ni];
     for (int i = 0; i < ns; i++)   // nor where someone else is taking one
-        for (int j = 0; j < g_npets; j++)
-            if (g_pets[j]->pet.job.kind != JOB_NONE && g_pets[j]->pet.job.to.x == spots[i].x &&
-                g_pets[j]->pet.job.to.y == spots[i].y) {
-                spots[i--] = spots[--ns];
-                break;
-            }
+        if (spot_wanted(spots[i], NULL)) spots[i--] = spots[--ns];
     for (int t = 0; t < 8 && ni && ns && !ok; t++) {
         int i = rand_in(0, ni - 1), s = rand_in(0, ns - 1);
         IconJob j = { JOB_SCATTER, JOB_ON, icons_size(), icons[i].pt, spots[s], icons[i].pt, sneak };
@@ -971,7 +998,7 @@ static void restore_start(void)
     free(m);
     if (!g_nqueue) return;
     g_restoring = 1;
-    announce(L"好啦好啦，这就搬回去……", 4000, 0);
+    announce(L"好啦好啦，这就搬回去……", 4000, 0, SAY_ONCE);
 }
 
 // Hands the next icon to be put back to a free pet on its screen.
@@ -980,13 +1007,17 @@ static void restore_next(void)
     int busy = jobs_of(JOB_RESTORE);
     if (!g_nqueue && !busy) {
         g_restoring = g_whip = 0;
-        announce(L"桌面图标都放回去啦", 4000, 0);
+        announce(L"桌面图标都放回去啦", 4000, 0, SAY_ONCE);
         return;
     }
     if (!g_nqueue) return;
+    int idle = 0;   // anyone to hand it to (looking the icon up means going through the whole desktop)
+    for (int i = 0; i < g_npets; i++)
+        idle |= !g_pets[i]->hidden && g_pets[i]->pet.job.kind == JOB_NONE && g_pets[i]->pet.state != ST_LEAVE;
+    if (!idle) return;
     MovedIcon *it = &g_queue[g_nqueue - 1];
     POINT now;
-    if (!icons_find(it->name, &now) || now.x != it->now.x || now.y != it->now.y) {   // gone, or the user moved it
+    if (!icons_find(it->name, &now) || !icons_same_spot(now, it->now)) {   // gone, or the user moved it
         moved_forget(it->name);
         g_nqueue--;
         return;
@@ -1018,12 +1049,8 @@ static void icon_land(PetWin *pw, POINT at)
     int ns = spots ? icons_free_spots(spots, MAX_SPOTS, &p->area) : 0;
     double bd = hypot(at.x - best.x, at.y - best.y);   // where it is now counts as free
     for (int i = 0; i < ns; i++) {
-        int taken = 0;   // not where someone else is taking one
-        for (int j = 0; j < g_npets; j++)
-            taken |= g_pets[j] != pw && g_pets[j]->pet.job.kind != JOB_NONE && g_pets[j]->pet.job.to.x == spots[i].x &&
-                     g_pets[j]->pet.job.to.y == spots[i].y;
         double d = hypot(at.x - spots[i].x, at.y - spots[i].y);
-        if (!taken && d < bd) {
+        if (d < bd && !spot_wanted(spots[i], pw)) {   // not where someone else is taking one
             bd = d;
             best = spots[i];
         }
@@ -1036,15 +1063,14 @@ static void icon_land(PetWin *pw, POINT at)
 
 // No other icon at pt: one put down on top of another has Explorer push a
 // whole run of them along the grid, so that is never done.
-static int spot_clear(PetWin *pw, POINT pt)
+static int spot_clear(const wchar_t *name, POINT pt, int size)
 {
     enum { MAX_BY = 16 };
     DeskIcon by[MAX_BY];
-    int size = pw->pet.job.size;
     RECT r = { pt.x - size / 2, pt.y - size / 2, pt.x + size * 3 / 2, pt.y + size * 3 / 2 };
     int n = icons_list(by, MAX_BY, &r);
     for (int i = 0; i < n; i++)
-        if (wcscmp(by[i].name, pw->icon_name)) return 0;
+        if (wcscmp(by[i].name, name)) return 0;
     return 1;
 }
 
@@ -1055,7 +1081,7 @@ static void icon_put(PetWin *pw)
     POINT to = pw->pet.job.to;
     if (pw->icon_put) return;
     pw->icon_put = 1;
-    if (!spot_clear(pw, to)) {
+    if (!spot_clear(pw->icon_name, to, pw->pet.job.size)) {
         icon_land(pw, to);
     } else if (pw->icon_at.x != to.x || pw->icon_at.y != to.y) {
         icons_move(pw->icon_h, to);
@@ -1085,6 +1111,15 @@ static void job_end(PetWin *pw)
         it->home = p->job.to;
         it->now = pw->icon_at;
     }
+    if (p->job.kind == JOB_SCATTER && g_feat_icons && !g_icons_told &&
+        (p->job.status == JOB_CAUGHT || (p->job.status == JOB_DONE && !p->job.sneak))) {
+        // The first time it is seen at it, it owns up, and says how to get them back.
+        g_icons_told = 1;
+        reg_set_dword(L"IconsTold", 1);
+        tb_show(&pw->tb, p->job.status == JOB_CAUGHT ? L"被你发现啦……\n想让我搬回去，就右键点我，\n选「恢复桌面图标」"
+                                                    : L"嘿嘿，给它换了个地方～\n想让我搬回去，就右键点我，\n选「恢复桌面图标」",
+                12000, SAY_ICONS);
+    }
     p->job.kind = JOB_NONE;
 }
 
@@ -1108,9 +1143,7 @@ static int sneak_seen(PetWin *pw)
         POINT at = up ? p->job.at : pw->icon_at;   // the picture lets the mouse through, so this finds what is in front
         POINT c = { at.x + p->job.size / 2, at.y + p->job.size / 2 };
         HWND h = WindowFromPoint(c);
-        wchar_t cls[32] = L"";
-        if (h) GetClassNameW(GetAncestor(h, GA_ROOT), cls, 32);
-        if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) return 1;
+        if (h && is_desktop(GetAncestor(h, GA_ROOT))) return 1;
     }
     return 0;
 }
@@ -1130,7 +1163,7 @@ static void icons_tick(void)
             pet_caught(p);
             if (p->job.kind != JOB_NONE) job_end(pw);
         }
-        if (pw->sneak && p->job.kind == JOB_NONE && !p->paper) set_sneak(pw, 0);   // done (or caught)
+        if (pw->sneak && p->job.kind == JOB_NONE && !p->paper) pw->sneak = 0;   // done (or caught)
         update_low(pw);
     }
     if (g_restoring) restore_next();
@@ -1140,11 +1173,7 @@ static void icons_tick(void)
 // ours): returns its monitor, or NULL.
 static HMONITOR app_in_front(HWND fg)
 {
-    wchar_t cls[32] = L"";
-    if (!fg || is_own_window(fg) || !IsWindowVisible(fg) || IsIconic(fg)) return NULL;
-    GetClassNameW(fg, cls, 32);
-    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
-        !wcscmp(cls, L"Shell_SecondaryTrayWnd"))
+    if (!fg || is_own_window(fg) || !IsWindowVisible(fg) || IsIconic(fg) || is_desktop(fg) || is_taskbar(fg))
         return NULL;
     return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
 }
@@ -1157,17 +1186,13 @@ static HMONITOR covering_app(HWND fg)
     MONITORINFO mi = { sizeof mi };
     RECT r;
     if (!m || !GetWindowRect(fg, &r) || !GetMonitorInfoW(m, &mi)) return NULL;
-    RECT s = mi.rcMonitor, w = mi.rcWork;
-    if (r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom) return NULL;
-    return r.left <= w.left && r.top <= w.top && r.right >= w.right && r.bottom >= w.bottom ? m : NULL;
+    return !covers(&r, &mi.rcMonitor) && covers(&r, &mi.rcWork) ? m : NULL;
 }
 
 static void icons_every_second(void)
 {
     ULONGLONG now = GetTickCount64();
     HWND fg = GetForegroundWindow();
-    wchar_t cls[32] = L"";
-    if (fg) GetClassNameW(fg, cls, 32);
     if (!g_sneak_at) g_sneak_at = now + (ULONGLONG)rand_in(SNEAK_MIN_MS, SNEAK_MAX_MS);
     if (!g_feat_icons || g_restoring) {
         g_desk_since = 0;
@@ -1176,7 +1201,7 @@ static void icons_every_second(void)
     // Looking at the desktop a minute or two: out they come and move some anyway.
     // (Our own menu or windows on top of it don't count as looking away.)
     if (fg && is_own_window(fg) && !g_focus) {
-    } else if ((!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW")) && !g_focus) {
+    } else if (is_desktop(fg) && !g_focus) {
         if (!g_desk_since) {
             g_desk_since = now;
             g_desk_wait = (ULONGLONG)rand_in(DESK_MIN_MS, DESK_MAX_MS);
@@ -1251,21 +1276,14 @@ static HCURSOR make_whip(void)
             if (by) art[y * A + x] = EDGE;
         }
     uint32_t *bits;
-    HBITMAP color = make_dib(size, size, &bits);
+    HBITMAP color = ui_dib(size, size, &bits);
     memset(bits, 0, (size_t)size * size * 4);
     for (int y = 0; y < A * k && y < size; y++)
         for (int x = 0; x < A * k && x < size; x++) {
             uint32_t c = art[(y / k) * A + x / k];
             bits[y * size + x] = c ? c | 0xFF000000u : 0;
         }
-    void *zeros = calloc((size_t)((size + 15) / 16 * 2) * size, 1);
-    HBITMAP mask = CreateBitmap(size, size, 1, 1, zeros);
-    ICONINFO ii = { FALSE, (DWORD)(2 * k), (DWORD)(2 * k), mask, color };   // hotspot on the popper
-    HCURSOR cur = (HCURSOR)CreateIconIndirect(&ii);
-    DeleteObject(mask);
-    DeleteObject(color);
-    free(zeros);
-    return cur;
+    return (HCURSOR)icon_from(color, size, 1, 2 * k);   // hotspot on the popper
 }
 
 // Quitting mid-job: the icon stays where it is, and that is written down.
@@ -1273,6 +1291,36 @@ static void icons_quit(void)
 {
     for (int i = 0; i < g_npets; i++)
         if (g_pets[i]->pet.job.kind != JOB_NONE) job_end(g_pets[i]);
+}
+
+// Every icon they moved, straight back where it was, with no carrying: for
+// when there is no time for that, on the way out.
+static void icons_home(void)
+{
+    enum { MAX_HOME = 256 };
+    MovedIcon *m = malloc(sizeof *m * MAX_HOME);
+    int n = moved_load(m, MAX_HOME), size = icons_size();
+    for (int pass = 0, went = 1; pass < n && went; pass++) {   // again, for one whose place another of them was in
+        went = 0;
+        for (int i = 0; i < n; i++) {
+            POINT at;
+            int h;
+            if (!m[i].name[0]) continue;
+            if (!icons_find(m[i].name, &at) || !icons_same_spot(at, m[i].now)) {   // gone, or the user moved it
+                moved_forget(m[i].name);
+                m[i].name[0] = 0;
+            } else if (spot_clear(m[i].name, m[i].home, size) && (h = icons_grab(m[i].name)) >= 0) {
+                icons_move(h, m[i].home);
+                icons_release(h);
+                if (icons_find(m[i].name, &at) && icons_same_spot(at, m[i].home)) {
+                    moved_forget(m[i].name);
+                    went = 1;
+                }
+                m[i].name[0] = 0;
+            }
+        }
+    }
+    free(m);
 }
 
 /* ---- tray & timers ---------------------------------------------------- */
@@ -1321,12 +1369,7 @@ static void tray_add(void)
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
-static DWORD user_idle_ms(void)
-{
-    LASTINPUTINFO li = { sizeof li };
-    GetLastInputInfo(&li);
-    return GetTickCount() - li.dwTime;
-}
+static void cc_expire(ULONGLONG now);
 
 static void every_second(void)
 {
@@ -1340,7 +1383,7 @@ static void every_second(void)
     g_world.cpu = g_world.cpu * 0.5 + sample_cpu() * 0.5;
     g_world.heat = sample_heat();
 
-    if (g_cc && now >= g_cc_until) g_cc = CLAUDE_IDLE;
+    cc_expire(now);
 
     if (g_pomo && now >= g_pomo_end) {
         if (g_pomo == 1) {
@@ -1350,17 +1393,17 @@ static void every_second(void)
             g_pomo = 2;
             g_pomo_end = now + (ULONGLONG)g_pomo_break * 60000;
             pomo_focus_over();
-            announce(msg, 60000, 1);
+            announce(msg, 60000, 1, SAY_POMO);
         } else {
             g_pomo = 0;
-            announce(L"休息结束，继续加油！", 15000, 1);
+            announce(L"休息结束，继续加油！", 15000, 1, SAY_POMO);
         }
     }
 
     // Only remind someone who is actually at the computer.
-    if (g_feat_water && g_water && now >= g_water_next && user_idle_ms() < 60000) {
+    if (g_feat_water && g_water && now >= g_water_next && plat_idle_ms() < 60000) {
         g_water_next = now + (ULONGLONG)WATER_MIN[g_water] * 60000;
-        announce(L"该喝水啦！", 15000, 1);
+        announce(L"该喝水啦！", 15000, 1, SAY_WATER);
     }
 
     update_tooltip();
@@ -1380,6 +1423,11 @@ static void tick(void)
     if (n % 15 == 0) {
         g_fs_mon = g_hide_fullscreen ? fullscreen_monitor() : NULL;
         walls_hide_on(g_fs_mon);
+        for (int i = 0; i < g_npets; i++) {   // carried to a screen with another scaling, or the scaling was changed
+            Pet *p = &g_pets[i]->pet;
+            int k = scale_for(g_size, pet_dpi(g_pets[i]));
+            if (k != p->scale && p->state != ST_DRAG) pet_set_scale(p, k);
+        }
     }
     if (n % 60 == 0) walls_raise();   // the pets go back on top of them just below
 
@@ -1391,7 +1439,7 @@ static void tick(void)
         int hide = g_fs_mon && pet_monitor(&pw->pet) == g_fs_mon && g_press_pw != pw;
         if (hide != pw->hidden) {
             pw->hidden = hide;
-            pw->dirty = 1;
+            pw->body.w = 0;   // drawn afresh when it is back
             ShowWindow(pw->hwnd, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
             if (hide) {
                 tb_suspend(&pw->tb);
@@ -1400,6 +1448,7 @@ static void tick(void)
             }
         }
         if (hide) {
+            tb_suspend(&pw->tb);   // a reminder waits until there is someone to see it
             if (pw->pet.state == ST_LEAVE) pw->pet.gone = 1;   // nobody to see the fall
             continue;
         }
@@ -1419,7 +1468,7 @@ static void tick(void)
         present_layers(pw);
         present_catch(pw);
         if (pw->sneak) tb_suspend(&pw->tb);   // no giving itself away
-        else tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, g_dpi);
+        else tb_update(&pw->tb, pet_head(&pw->pet), pw->pet.area, pet_dpi(pw));
         if (n % 60 == 0) {   // the taskbar likes to climb above us; text bubbles go above pets
             restack(pw);
             if (pw->tb.shown)
@@ -1437,30 +1486,74 @@ static void tick(void)
         if (g_pets[i]->pet.gone) destroy_pet(i);
 }
 
-static void on_cc_event(int ev)
+// Claude Code as a whole: waiting for the user if any session is, else at
+// work if any is.
+static void cc_sum(void)
+{
+    int was = g_cc;
+    g_cc = CLAUDE_IDLE;
+    for (int i = 0; i < g_nsess; i++)
+        if (g_sess[i].state > g_cc) g_cc = g_sess[i].state;   // CLAUDE_WAITING is the highest
+    if (was == CLAUDE_WAITING && g_cc != CLAUDE_WAITING && g_npets) tb_drop(&g_pets[0]->tb, SAY_CC);
+    g_world.cc = g_cc;
+}
+
+// Session id is in `state` until `until`; CLAUDE_IDLE: done, and forgotten.
+static void cc_set(unsigned id, int state, ULONGLONG until)
+{
+    int i = 0;
+    while (i < g_nsess && g_sess[i].id != id) i++;
+    if (state == CLAUDE_IDLE) {
+        if (i < g_nsess) g_sess[i] = g_sess[--g_nsess];
+    } else {
+        if (i == g_nsess && g_nsess < MAX_SESSIONS) {
+            g_nsess++;
+        } else if (i == g_nsess) {   // no room: the one nearest to lapsing makes way
+            i = 0;
+            for (int j = 1; j < g_nsess; j++)
+                if (g_sess[j].until < g_sess[i].until) i = j;
+        }
+        g_sess[i] = (Session){ id, state, until };
+    }
+    cc_sum();
+}
+
+// Not a word from a session for too long: assume it stopped.
+static void cc_expire(ULONGLONG now)
+{
+    for (int i = g_nsess - 1; i >= 0; i--)
+        if (now >= g_sess[i].until) g_sess[i] = g_sess[--g_nsess];
+    cc_sum();
+}
+
+// "ok, I saw it": no more waving.
+static void cc_seen(void)
+{
+    for (int i = g_nsess - 1; i >= 0; i--)
+        if (g_sess[i].state == CLAUDE_WAITING) g_sess[i] = g_sess[--g_nsess];
+    cc_sum();
+}
+
+static void on_cc_event(int ev, unsigned session)
 {
     ULONGLONG now = GetTickCount64();
     switch (ev) {
     case CC_EV_PROMPT:
     case CC_EV_TOOL:
-        if (g_cc == CLAUDE_WAITING && g_npets) tb_hide(&g_pets[0]->tb);
-        g_cc = CLAUDE_WORKING;
-        g_cc_until = now + CC_WORK_MS;
+        cc_set(session, CLAUDE_WORKING, now + CC_WORK_MS);
         break;
     case CC_EV_PERMISSION:
-        g_cc = CLAUDE_WAITING;
-        g_cc_until = now + CC_WAIT_MS;
-        announce(L"Claude 在等你确认～", 8000, 0);
+        cc_set(session, CLAUDE_WAITING, now + CC_WAIT_MS);
+        announce(L"Claude 在等你确认～", 8000, 0, SAY_CC);
         break;
     case CC_EV_STOP:
-        g_cc = CLAUDE_IDLE;
-        announce(L"搞定啦！", 4000, 1);
+        cc_set(session, CLAUDE_IDLE, 0);
+        announce(L"搞定啦！", 4000, 1, SAY_ONCE);
         break;
     case CC_EV_END:
-        g_cc = CLAUDE_IDLE;
+        cc_set(session, CLAUDE_IDLE, 0);
         break;
     }
-    g_world.cc = g_cc;
 }
 
 /* ---- menu ------------------------------------------------------------- */
@@ -1469,13 +1562,13 @@ static void set_size(int size)
 {
     g_size = size;
     reg_set_dword(L"Size", (DWORD)size);
-    for (int i = 0; i < g_npets; i++) pet_set_scale(&g_pets[i]->pet, scale_for(size));
+    for (int i = 0; i < g_npets; i++) pet_set_scale(&g_pets[i]->pet, scale_for(size, pet_dpi(g_pets[i])));
 }
 
 // Pets stand in front of walls, and the drawing hint can go.
 static void wall_drawn(void)
 {
-    if (g_npets) tb_hide(&g_pets[0]->tb);
+    if (g_npets) tb_drop(&g_pets[0]->tb, SAY_WALL);
     for (int i = 0; i < g_npets; i++) restack(g_pets[i]);
 }
 
@@ -1492,7 +1585,7 @@ static void pomo_start(int focus, int brk)
     if (!g_focus) g_focus = g_focus_pomo = 1;
     _snwprintf(msg, 64, L"开始专注 %d 分钟！", focus);
     msg[63] = 0;
-    announce(msg, 4000, 0);
+    announce(msg, 4000, 0, SAY_ONCE);
     update_tooltip();
 }
 
@@ -1524,9 +1617,13 @@ static void show_menu(PetWin *pw)
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_update), IDM_FEAT_UPDATE, L"自动检查更新");
     AppendMenuW(feat, MF_STRING | CHECK(g_feat_icons), IDM_FEAT_ICONS, L"打乱桌面图标");
 
-    int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0;
+    int paused = pw ? pw->pet.paused : g_pets[0]->pet.paused, can_climb = 0, asleep = 0;
     for (int i = 0; i < g_npets; i++)
-        if (!pw || g_pets[i] == pw) can_climb |= pet_can_climb(&g_pets[i]->pet);
+        if (!pw || g_pets[i] == pw) {
+            const Pet *p = &g_pets[i]->pet;
+            can_climb |= pet_can_climb(p);
+            asleep |= p->state == ST_SLEEP && p->forced_sleep;   // sent to sleep: only the user wakes it
+        }
     // Settings live in one submenu; the top level is things to do right now.
     HMENU set = CreatePopupMenu();
     AppendMenuW(set, MF_POPUP, (UINT_PTR)sz, L"大小");
@@ -1551,7 +1648,8 @@ static void show_menu(PetWin *pw)
     UINT busy = g_focus ? MF_GRAYED : 0;
     AppendMenuW(m, MF_STRING | CHECK(g_focus), IDM_FOCUS, L"专注模式");
     AppendMenuW(m, MF_STRING | CHECK(paused), IDM_PAUSE, L"待在原地");
-    AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
+    if (asleep) AppendMenuW(m, MF_STRING, IDM_WAKE, pw ? L"叫醒它" : L"都叫醒");
+    else AppendMenuW(m, MF_STRING, IDM_SLEEP, L"去睡觉");
     AppendMenuW(m, MF_STRING, IDM_WARDROBE, L"换装…");
     // Tricks any one of them can do, then the games that take two.
     HMENU play = CreatePopupMenu();
@@ -1595,7 +1693,7 @@ static void show_menu(PetWin *pw)
     }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_npets >= MAX_PETS ? MF_GRAYED : 0), IDM_ADD_PET, L"再来一只");
-    AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, L"送走一只");
+    AppendMenuW(m, MF_STRING | (active_pets() <= 1 ? MF_GRAYED : 0), IDM_REMOVE_PET, pw ? L"送走这只" : L"送走一只");
     if (g_update_ready) {
         wchar_t up[64];
         _snwprintf(up, 64, L"更新到 %hs", update_tag());
@@ -1631,9 +1729,13 @@ static void show_menu(PetWin *pw)
         for (int i = 0; i < g_npets; i++)
             if (!pw || g_pets[i] == pw) ask(g_pets[i], cmd);
         break;
+    case IDM_WAKE:
+        for (int i = 0; i < g_npets; i++)
+            if (!pw || g_pets[i] == pw) pet_wake(&g_pets[i]->pet);
+        break;
     case IDM_WALL_DRAW:
-        announce(L"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消", 30000, 0);
-        walls_draw(scale_for(g_size), wall_drawn);
+        announce(L"按住鼠标拖一下，画一面墙\n横着拖是横墙，竖着拖是竖墙\n右键或 Esc 取消", 30000, 0, SAY_WALL);
+        walls_draw((pw ? pw : g_pets[0])->pet.scale, wall_drawn);
         break;
     case IDM_WALL_CLEAR:
         walls_clear();
@@ -1652,7 +1754,7 @@ static void show_menu(PetWin *pw)
         update_check(g_host, WM_UPDATE, 1);
         break;
     case IDM_UPDATE_INSTALL:
-        announce(L"正在下载新版本…", 60000, 0);
+        announce(L"正在下载新版本…", 60000, 0, SAY_UPDATE);
         update_install(g_host, WM_UPDATE);
         break;
     case IDM_FEAT_ICONS:
@@ -1691,17 +1793,17 @@ static void show_menu(PetWin *pw)
         for (int i = 0; i < g_npets; i++)
             if (!g_pets[i]->hidden && g_pets[i]->pet.state != ST_LEAVE) all[n++] = &g_pets[i]->pet;
         if (!pets_play(all, n, pw ? &pw->pet : NULL, cmd - IDM_PLAY_GREET))
-            announce(L"它们现在都忙着呢，待会儿再试试～", 3000, 0);
+            announce(L"它们现在都忙着呢，待会儿再试试～", 3000, 0, SAY_ONCE);
         break;
     }
     case IDM_WARDROBE: {   // from the tray: the first one
         const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
-        wardrobe_open(pet_head(p), p->area, g_dpi, p->id, p->wear, dressed);
+        wardrobe_open(pet_head(p), p->area, pet_dpi(pw ? pw : g_pets[0]), p->id, p->wear, dressed);
         break;
     }
     case IDM_POMO_START: {
         const Pet *p = pw ? &pw->pet : &g_pets[0]->pet;
-        picker_open(pet_head(p), p->area, g_dpi, g_pomo_focus, g_pomo_break, pomo_start);
+        picker_open(pet_head(p), p->area, pet_dpi(pw ? pw : g_pets[0]), g_pomo_focus, g_pomo_break, pomo_start);
         break;
     }
     case IDM_POMO_STOP:
@@ -1732,7 +1834,7 @@ static void show_menu(PetWin *pw)
         reg_set_dword(L"Count", (DWORD)active_pets());
         break;
     case IDM_REMOVE_PET:
-        send_away_pet();
+        send_away(pw);
         reg_set_dword(L"Count", (DWORD)active_pets());
         break;
     case IDM_SIZE_S:
@@ -1749,15 +1851,29 @@ static void show_menu(PetWin *pw)
             cli_set(0);
         } else {
             cli_set(1);
-            if (cli_enabled()) announce(L"新开一个终端，\n输入 clawd 就能叫我出来", 6000, 0);
+            if (cli_enabled()) announce(L"新开一个终端，\n输入 clawd 就能叫我出来", 6000, 0, SAY_ONCE);
         }
         break;
     case IDM_AUTOSTART:
         autostart_set(!autostart_enabled());
         break;
-    case IDM_EXIT:
+    case IDM_EXIT: {
+        static int asking;
+        if (asking) break;
+        if (moved_check(icon_busy) || jobs_of(JOB_SCATTER)) {   // icons still out of place: not left like that unasked
+            asking = 1;
+            int a = MessageBoxW(NULL, L"还有桌面图标没搬回原位。\n退出前把它们放回去吗？", L"Clawd",
+                                MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
+            asking = 0;
+            if (a != IDYES && a != IDNO) break;
+            if (a == IDYES) {
+                icons_quit();
+                icons_home();
+            }
+        }
         DestroyWindow(g_host);
         break;
+    }
     }
     update_tooltip();
 }
@@ -1808,10 +1924,7 @@ static LRESULT CALLBACK pet_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (was_drag) {
             pet_end_drag(&pw->pet);
         } else if (msg == WM_LBUTTONUP) {
-            if (g_cc == CLAUDE_WAITING) {   // "ok, I saw it"
-                g_cc = CLAUDE_IDLE;
-                tb_hide(&g_pets[0]->tb);
-            }
+            if (g_cc == CLAUDE_WAITING) cc_seen();
             pet_click(&pw->pet);
         }
         return 0;
@@ -1835,14 +1948,14 @@ static void on_update(int result, int manual)
             strcpy(g_update_told, update_tag());
             _snwprintf(msg, 128, L"有新版本 %hs 啦！\n右键菜单里点「更新到 %hs」", update_tag(), update_tag());
             msg[127] = 0;
-            announce(msg, 10000, 0);
+            announce(msg, 10000, 0, SAY_UPDATE);
         }
         break;
     case UPD_LATEST:
-        if (manual) announce(L"已经是最新版 v" CLAWD_VERSION L" 啦", 4000, 0);
+        if (manual) announce(L"已经是最新版 v" CLAWD_VERSION L" 啦", 4000, 0, SAY_ONCE);
         break;
     case UPD_FAILED:
-        if (manual) announce(L"检查更新失败了，网络好像不太通", 4000, 0);
+        if (manual) announce(L"检查更新失败了，网络好像不太通", 4000, 0, SAY_ONCE);
         break;
     case UPD_INSTALLED: {   // start the new one and make way for it
         wchar_t exe[MAX_PATH], cmd[MAX_PATH + 32];
@@ -1856,12 +1969,12 @@ static void on_update(int result, int manual)
             CloseHandle(pi.hProcess);
             DestroyWindow(g_host);
         } else {
-            announce(L"新版本下好了，重启一下 Clawd 就能用", 8000, 0);
+            announce(L"新版本下好了，重启一下 Clawd 就能用", 8000, 0, SAY_ONCE);
         }
         break;
     }
     case UPD_INSTALL_FAILED:
-        announce(L"自动更新没成功，帮你打开下载页面了", 6000, 0);
+        announce(L"自动更新没成功，帮你打开下载页面了", 6000, 0, SAY_ONCE);
         ShellExecuteW(NULL, L"open", update_page(), NULL, NULL, SW_SHOWNORMAL);
         break;
     }
@@ -1889,7 +2002,7 @@ static LRESULT CALLBACK host_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     if (msg == g_msg_cc && g_msg_cc) {
-        on_cc_event((int)wp);
+        on_cc_event((int)wp, (unsigned)lp);
         return 0;
     }
     if (msg == g_msg_taskbar && g_msg_taskbar) {   // explorer restarted
@@ -1978,6 +2091,47 @@ static int write_sheet(const wchar_t *path)
 
 /* ---- entry ------------------------------------------------------------ */
 
+// The "session_id" in a piece of the hook's JSON, boiled down to a number;
+// 0 if it is not (all) there.
+static unsigned session_in(const char *json)
+{
+    const char *s = strstr(json, "\"session_id\""), *end;
+    if (!s || !(s = strchr(s + 12, ':')) || !(s = strchr(s, '"')) || !(end = strchr(s + 1, '"'))) return 0;
+    unsigned h = 2166136261u;
+    for (s++; s < end; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h ? h : 1;
+}
+
+// Which Claude Code session a hook is from: Claude Code hands every hook a
+// JSON object on stdin. 0 if there is nothing there (run by hand, say).
+static unsigned hook_session(void)
+{
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    char buf[4096];
+    DWORD n = 0;
+    unsigned id = 0;
+    if (!in || in == INVALID_HANDLE_VALUE || GetFileType(in) != FILE_TYPE_PIPE) return 0;
+    for (int waited = 0; !id && waited < 200;) {   // it is written straight away: a little patience, no more
+        DWORD avail = 0, got = 0;
+        if (!PeekNamedPipe(in, NULL, 0, NULL, &avail, NULL)) break;   // closed: that was all of it
+        if (!avail) {
+            Sleep(10);
+            waited += 10;
+            continue;
+        }
+        if (n > sizeof buf / 2) {   // filling up: on with the tail of it, which may hold the start of the id
+            memmove(buf, buf + n - 256, 256);
+            n = 256;
+        }
+        if (avail > sizeof buf - 1 - n) avail = sizeof buf - 1 - n;
+        if (!ReadFile(in, buf + n, avail, &got, NULL) || !got) break;
+        n += got;
+        buf[n] = 0;
+        id = session_in(buf);
+    }
+    return id;
+}
+
 // `clawd.exe --cc <event>`: forward a Claude Code hook event to the running pet.
 static int send_cc_event(const wchar_t *name)
 {
@@ -1985,7 +2139,7 @@ static int send_cc_event(const wchar_t *name)
     if (!host) return 0;
     UINT msg = RegisterWindowMessageW(L"ClawdPet.CC");
     for (int i = 0; i < (int)(sizeof CC_EVENTS / sizeof CC_EVENTS[0]); i++)
-        if (!wcscmp(name, CC_EVENTS[i])) PostMessageW(host, msg, (WPARAM)(i + 1), 0);
+        if (!wcscmp(name, CC_EVENTS[i])) PostMessageW(host, msg, (WPARAM)(i + 1), (LPARAM)hook_session());
     return 0;
 }
 
@@ -2014,6 +2168,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     srand(GetTickCount());
     g_dpi = GetDpiForSystem();
     if (cli_enabled()) cli_write_shim();   // follow the exe if it was moved
+    HKEY key;
+    int fresh = RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS;   // never run here before
+    if (!fresh) RegCloseKey(key);
+    g_icons_told = reg_get_dword(L"IconsTold", 0) != 0;
     g_size = clampi((int)reg_get_dword(L"Size", 1), 0, 2, 1);
     g_mouse_mode = clampi((int)reg_get_dword(L"MouseMode", MOUSE_OFF), 0, 2, MOUSE_OFF);
     g_typing_on = reg_get_dword(L"Typing", 1) != 0;
@@ -2065,9 +2223,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
 
     for (int i = 0; i < count; i++) spawn_pet(0);
     tray_add();
+    if (fresh) {   // new here: how to get at everything it can do
+        announce(L"你好呀！右键点我，\n看看我都会些什么", 12000, 0, SAY_HELLO);
+        reg_set_dword(L"Seen", 1);
+    }
     if (updated) {
         update_cleanup();
-        announce(L"更新好啦！现在是 v" CLAWD_VERSION, 5000, 1);
+        announce(L"更新好啦！现在是 v" CLAWD_VERSION, 5000, 1, SAY_ONCE);
     }
     SetTimer(g_host, 1, TICK_MS, NULL);
 
