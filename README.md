@@ -4,6 +4,8 @@ Claude Code 吉祥物 Clawd 的 Windows / macOS 桌宠。Windows 版是纯 C + W
 
 > 粉丝作品，与 Anthropic 无关。Clawd 形象归 Anthropic 所有。
 
+> **macOS 版暂停维护**：功能停在 v1.4.2，之后的新东西只有 Windows 版有。Release 里的 `Clawd-mac.zip` 还会跟着每个版本编出来，版本号也跟着走，但里面还是 v1.4.2 的那些功能。
+
 ## 功能
 
 - 站在任务栏上，眨眼、张望、走来走去、偶尔蹦一下
@@ -63,7 +65,7 @@ make        # 产物是 mac/build/Clawd.app
 make run    # 编译并启动
 ```
 
-`src/pet.c`（状态机、物理）和 `src/render.c`（像素画）两边共用，平台相关的部分分别在 `src/platform_win.c` 和 `mac/plat_mac.m` 里，所以两个平台的行为是一致的。
+`src/pet.c`（状态机、物理）和 `src/render.c`（像素画）两边共用，平台相关的部分分别在 `src/platform_win.c` 和 `mac/plat_mac.m` 里，所以走路、跳、互动这些两个平台是一致的；菜单、提醒、Claude Code 联动这些外壳上的功能，macOS 版停在 v1.4.2。
 
 ## 联动 Claude Code
 
@@ -114,7 +116,7 @@ macOS 上对应的是 `Clawd.app/Contents/MacOS/Clawd`，参数完全一样（�
 
 ## macOS 版说明
 
-行为跟 Windows 版一样，只是把几个系统概念换了个说法：
+暂停维护，下面是 v1.4.2 时的情况：行为跟当时的 Windows 版一样，只是把几个系统概念换了个说法：
 
 | Windows | macOS |
 |---|---|
