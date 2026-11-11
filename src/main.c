@@ -20,9 +20,10 @@
 
 #define WM_TRAY    (WM_APP + 1)
 #define WM_UPDATE  (WM_APP + 2)   // from update.c: wParam UPD_*, lParam manual
-// Timers go off on the system's 15.6 ms beat: 31 gets every second one of
-// those (32 a second), where 33 would wait for the third (21 a second).
-#define TICK_MS    31
+// Timers go off on the system's 15.6 ms beat, so 33 really waits for every
+// third one: 21 ticks a second, and that is the pace everything the pets do
+// is tuned to. (31 would get every second beat, and all of it 1.5 times as fast.)
+#define TICK_MS    33
 #define MAX_PETS   6
 #define APP_NAME   L"ClawdPet"
 #define HOST_CLASS L"ClawdPetHost"
@@ -801,23 +802,57 @@ static int rand_in(int lo, int hi)
     return lo + (int)(((unsigned)rand() << 15 ^ (unsigned)rand()) % (unsigned)(hi - lo + 1));
 }
 
+// The window the desktop's icons are in: Progman, or one of the WorkerWs
+// (which it is depends on the Windows version and on what draws the wallpaper).
+static HWND desk_window(void)
+{
+    static HWND desk;
+    if (desk && FindWindowExW(desk, NULL, L"SHELLDLL_DefView", NULL)) return desk;
+    desk = FindWindowW(L"Progman", NULL);
+    if (desk && FindWindowExW(desk, NULL, L"SHELLDLL_DefView", NULL)) return desk;
+    for (desk = NULL; (desk = FindWindowExW(NULL, desk, L"WorkerW", NULL)) != NULL;)
+        if (FindWindowExW(desk, NULL, L"SHELLDLL_DefView", NULL)) return desk;
+    return NULL;
+}
+
 // Moving icons (or sneaking back to its desk), a pet is down on the desktop
 // with them, its stairs too: just above the icons, under every window.
 // Otherwise it is on top of everything.
 static void restack(PetWin *pw)
 {
     UINT f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-    SetWindowPos(pw->hwnd, pw->low ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0, f);
+    HWND after = HWND_TOPMOST;
+    if (pw->low) {
+        // Right above the desktop, wherever that is: at the very bottom as a
+        // rule, but Show Desktop lifts it over every window (and anything
+        // that was simply sent to the bottom would be left under it).
+        after = desk_window();
+        do after = after ? GetWindow(after, GW_HWNDPREV) : NULL;
+        while (after && (after == pw->hwnd || after == pw->st.hwnd || after == pw->ic.hwnd || after == pw->dk.hwnd));
+        if (!after) after = HWND_BOTTOM;
+    }
+    SetWindowPos(pw->hwnd, after, 0, 0, 0, 0, f);
     if (pw->st.hwnd) SetWindowPos(pw->st.hwnd, pw->hwnd, 0, 0, 0, 0, f);
     if (pw->ic.hwnd) SetWindowPos(pw->ic.hwnd, pw->hwnd, 0, 0, 0, 0, f);
     if (pw->dk.hwnd) SetWindowPos(pw->dk.hwnd, pw->low ? HWND_TOPMOST : pw->hwnd, 0, 0, 0, 0, f);
+}
+
+// Still right above the desktop, with no window in between. Not so once the
+// desktop has gone up over it (Show Desktop), or back down from there.
+static int on_desk(const PetWin *pw)
+{
+    HWND h = pw->hwnd, desk = desk_window();
+    if (!desk) return 1;
+    while ((h = GetWindow(h, GW_HWNDNEXT)) != NULL && h != desk)
+        if (IsWindowVisible(h) && !IsIconic(h) && !is_own_window(h)) return 0;
+    return h != NULL;
 }
 
 // Down on the desktop while it is up to something with icons; on top otherwise.
 static void update_low(PetWin *pw)
 {
     int low = pw->sneak || pw->pet.job.kind != JOB_NONE;
-    if (low == pw->low) return;
+    if (low == pw->low && (!low || on_desk(pw))) return;
     pw->low = low;
     restack(pw);
 }
