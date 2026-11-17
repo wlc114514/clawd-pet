@@ -88,6 +88,8 @@ make run    # 编译并启动
 
 Claude Code 会把一段 JSON 从标准输入交给每个 hook，Windows 版的 `clawd.exe --cc` 只从里面读出 `session_id` 用来区分会话（换算成一个数字，别的不看也不存）；手动运行时没有这段输入，就都算同一个会话。
 
+Claude Code 2.1.139 之前的版本不认 hook 里的 `args`，只会运行 `clawd.exe` 本身。Windows 版会从那段 JSON 里的 `hook_event_name` 认出是哪个事件，照常转给运行中的桌宠；桌宠没在运行也不会因此被启动（v1.5.1 及更早会：关掉桌宠后，Claude 一动它就又回来了）。
+
 macOS 上把命令换成 app 里的可执行文件，其余一样：
 
 ```json

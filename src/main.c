@@ -2126,27 +2126,53 @@ static int write_sheet(const wchar_t *path)
 
 /* ---- entry ------------------------------------------------------------ */
 
+// The text of `key` ("\"session_id\"", say) in a piece of the hook's JSON
+// and where it ends; NULL if it is not (all) there.
+static const char *text_in(const char *json, const char *key, const char **end)
+{
+    const char *s = strstr(json, key);
+    if (!s || !(s = strchr(s + strlen(key), ':')) || !(s = strchr(s, '"')) || !(*end = strchr(s + 1, '"'))) return NULL;
+    return s + 1;
+}
+
 // The "session_id" in a piece of the hook's JSON, boiled down to a number;
 // 0 if it is not (all) there.
 static unsigned session_in(const char *json)
 {
-    const char *s = strstr(json, "\"session_id\""), *end;
-    if (!s || !(s = strchr(s + 12, ':')) || !(s = strchr(s, '"')) || !(end = strchr(s + 1, '"'))) return 0;
+    const char *end, *s = text_in(json, "\"session_id\"", &end);
+    if (!s) return 0;
     unsigned h = 2166136261u;
-    for (s++; s < end; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    for (; s < end; s++) h = (h ^ (unsigned char)*s) * 16777619u;
     return h ? h : 1;
+}
+
+// The "hook_event_name" in a piece of the hook's JSON, as one of CC_EV_*;
+// 0 if it is not (all) there, -1 if it is none of ours.
+static int event_in(const char *json)
+{
+    static const struct { const char *name; int ev; } HOOKS[] = {
+        { "UserPromptSubmit", CC_EV_PROMPT }, { "PostToolUse", CC_EV_TOOL }, { "PostToolUseFailure", CC_EV_TOOL },
+        { "PermissionRequest", CC_EV_PERMISSION }, { "Stop", CC_EV_STOP }, { "SessionEnd", CC_EV_END },
+    };
+    const char *end, *s = text_in(json, "\"hook_event_name\"", &end);
+    if (!s) return 0;
+    for (int i = 0; i < (int)(sizeof HOOKS / sizeof HOOKS[0]); i++)
+        if (strlen(HOOKS[i].name) == (size_t)(end - s) && !strncmp(s, HOOKS[i].name, (size_t)(end - s))) return HOOKS[i].ev;
+    return -1;
 }
 
 // Which Claude Code session a hook is from: Claude Code hands every hook a
 // JSON object on stdin. 0 if there is nothing there (run by hand, say).
-static unsigned hook_session(void)
+// With `ev`, which of its events it is as well (see event_in).
+static unsigned hook_session(int *ev)
 {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     char buf[4096];
     DWORD n = 0;
     unsigned id = 0;
+    if (ev) *ev = 0;
     if (!in || in == INVALID_HANDLE_VALUE || GetFileType(in) != FILE_TYPE_PIPE) return 0;
-    for (int waited = 0; !id && waited < 200;) {   // it is written straight away: a little patience, no more
+    for (int waited = 0; (!id || (ev && !*ev)) && waited < 200;) {   // it is written straight away: a little patience, no more
         DWORD avail = 0, got = 0;
         if (!PeekNamedPipe(in, NULL, 0, NULL, &avail, NULL)) break;   // closed: that was all of it
         if (!avail) {
@@ -2162,9 +2188,16 @@ static unsigned hook_session(void)
         if (!ReadFile(in, buf + n, avail, &got, NULL) || !got) break;
         n += got;
         buf[n] = 0;
-        id = session_in(buf);
+        if (!id) id = session_in(buf);
+        if (ev && !*ev) *ev = event_in(buf);
     }
     return id;
+}
+
+// Tells the running pet of a Claude Code event (CC_EV_*) in a session.
+static void cc_post(HWND host, int ev, unsigned session)
+{
+    PostMessageW(host, RegisterWindowMessageW(L"ClawdPet.CC"), (WPARAM)ev, (LPARAM)session);
 }
 
 // `clawd.exe --cc <event>`: forward a Claude Code hook event to the running pet.
@@ -2172,10 +2205,23 @@ static int send_cc_event(const wchar_t *name)
 {
     HWND host = FindWindowW(HOST_CLASS, NULL);
     if (!host) return 0;
-    UINT msg = RegisterWindowMessageW(L"ClawdPet.CC");
     for (int i = 0; i < (int)(sizeof CC_EVENTS / sizeof CC_EVENTS[0]); i++)
-        if (!wcscmp(name, CC_EVENTS[i])) PostMessageW(host, msg, (WPARAM)(i + 1), (LPARAM)hook_session());
+        if (!wcscmp(name, CC_EVENTS[i])) cc_post(host, i + 1, hook_session(NULL));
     return 0;
+}
+
+// Run by one of the Claude Code hooks above with nothing after the exe's
+// name: Claude Code before 2.1.139 knows no "args" and runs the hook's
+// "command" alone. It is that hook's event for the running pet all the same,
+// and never a reason to start one: a pet that was closed would be back at
+// Claude's next step.
+static int run_by_hook(void)
+{
+    int ev;
+    unsigned session = hook_session(&ev);
+    HWND host = FindWindowW(HOST_CLASS, NULL);
+    if (ev > 0 && host) cc_post(host, ev, session);
+    return ev > 0;
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
@@ -2187,6 +2233,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argc >= 3 && !wcscmp(argv[1], L"--sheet")) return write_sheet(argv[2]);
     if (argc >= 3 && !wcscmp(argv[1], L"--cc")) return send_cc_event(argv[2]);
+    if (argc < 2 && run_by_hook()) return 0;
 
     // Just updated: the old one is still on its way out, so wait for it.
     int updated = argc >= 2 && !wcscmp(argv[1], L"--updated");
